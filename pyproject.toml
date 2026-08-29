@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qbit-seasonal-anime"
+version = "0.1.0"
+description = "Automatically manage RSS Download Rules based on your seasonal anime."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "qbittorrent-api>=2024.0.0",
+    "sqlmodel>=0.0.16",
+    "httpx2>=2.0.0",
+    "guessit>=3.8.0",
+    "rapidfuzz>=3.9.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+qbit-seasonal-anime = "qbit_seasonal_anime.main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

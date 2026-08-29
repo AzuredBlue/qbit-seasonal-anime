@@ -1,0 +1,344 @@
+import logging
+import os
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
+from qbit_seasonal_anime.db.models import Monitored, Feed
+
+logger = logging.getLogger("qbit_seasonal_anime.core.rules")
+
+
+ROMAN_TO_INT = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
+INT_TO_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
+
+
+def generate_season_variants(alias: str) -> List[str]:
+    """Generate common release group season abbreviations (e.g. 'Mushoku Tensei S3', 'Mushoku Tensei Season 3')."""
+    variants = [alias]
+    m_s = re.search(
+        r"\b(?:season|s)\s*(\d+)\b|\b(\d+)(?:st|nd|rd|th)\s+season\b|\b(?:season|part)\s+(I|II|III|IV|V|VI)\b|\b(II|III|IV|V|VI)\b",
+        alias,
+        re.IGNORECASE,
+    )
+    if not m_s:
+        return variants
+
+    s_num = 0
+    if m_s.group(1):
+        s_num = int(m_s.group(1))
+    elif m_s.group(2):
+        s_num = int(m_s.group(2))
+    elif m_s.group(3):
+        s_num = ROMAN_TO_INT.get(m_s.group(3).upper(), 0)
+    elif m_s.group(4):
+        s_num = ROMAN_TO_INT.get(m_s.group(4).upper(), 0)
+
+    if s_num == 0:
+        return variants
+
+    base = re.split(r"[:\-_–]", alias)[0].strip()
+    base = re.sub(
+        r"\b(?:season|s)\s*\d+\b|\b\d+(?:st|nd|rd|th)\s+season\b|\b(?:season|part)\s+(?:I|II|III|IV|V|VI)\b|\b(II|III|IV|V|VI)\b",
+        "",
+        base,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    if base and len(base) >= 3:
+        roman = INT_TO_ROMAN.get(s_num, "")
+        variants.append(f"{base} S{s_num}")
+        variants.append(f"{base} Season {s_num}")
+        variants.append(f"{base} {s_num}")
+        if roman:
+            variants.append(f"{base} {roman}")
+    return variants
+
+
+def sanitize_regex_token(title: str) -> str:
+    """Escape special regex characters and normalize spaces."""
+    words = title.strip().split()
+    escaped_words = [re.escape(w) for w in words]
+    return r"\s+".join(escaped_words)
+
+
+def build_regex_pattern(
+    aliases: List[str],
+    matched_title: Optional[str] = None,
+    release_group: Optional[str] = None,
+) -> str:
+    """
+    Build a clean, minimal case-insensitive regex pattern for qBittorrent RSS rules.
+    If matched_title is known (e.g. verified during confirmation/discovery), creates a precise
+    and simple rule using ONLY that matched title (e.g. '(?i)Mushoku\\s+Tensei\\s+S3').
+    """
+    # 1. Simple, clean matched title rule (Works / Confirmed state)
+    if matched_title and matched_title.strip():
+        token = sanitize_regex_token(matched_title)
+        return rf"(?i){token}"
+
+    # 2. Fallback for unconfirmed / unreleased shows before first match:
+    # Filter to clean English / Romaji / Latin aliases to keep rule minimal
+    valid_aliases = [a.strip() for a in aliases if a and a.strip()]
+    latin_aliases = [a for a in valid_aliases if any(c.isascii() and c.isalnum() for c in a)]
+    target_aliases = latin_aliases if latin_aliases else valid_aliases
+
+    if not target_aliases:
+        return ".*"
+
+    expanded_aliases: List[str] = []
+    for a in target_aliases:
+        expanded_aliases.extend(generate_season_variants(a))
+
+    tokens = [sanitize_regex_token(a) for a in expanded_aliases]
+    unique_tokens = list(dict.fromkeys(tokens))
+    alternation = "|".join(unique_tokens)
+
+    return rf"(?i)({alternation})"
+
+
+def sanitize_folder_name(name: str) -> str:
+    r"""
+    Clean and sanitize anime title into a safe, valid, cross-platform folder name.
+    - Replaces slashes between words or fractions (e.g. 'Ranma 1/2' -> 'Ranma 1-2', 'Fate/stay' -> 'Fate-stay')
+    - Replaces remaining slashes and backslashes with hyphens
+    - Replaces colons with ' - '
+    - Removes forbidden filesystem characters: < > : " / \ | ? * and control chars
+    - Collapses multiple hyphens and whitespace
+    - Strips leading/trailing dots and spaces
+    """
+    if not name:
+        return "Anime"
+    # Replace slashes between alphanumeric words or numbers (e.g. 1/2 -> 1-2, Fate/stay -> Fate-stay)
+    s = re.sub(r"(\w+)[/](\w+)", r"\1-\2", name)
+    # Replace remaining slashes, backslashes, pipes with hyphens
+    s = re.sub(r"[/\\|]", " - ", s)
+    # Replace colons with ' - '
+    s = re.sub(r":\s*", " - ", s)
+    # Remove all forbidden characters < > " ? * and control chars
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s)
+    # Collapse multiple hyphens or spaces
+    s = re.sub(r"\s*-\s*-\s*", " - ", s)
+    s = re.sub(r"\s+", " ", s)
+    s = s.strip(" .")
+    return s or "Anime"
+
+
+def compress_home_path(path: Optional[str]) -> str:
+    """
+    If a path is within the user's home directory, collapses the absolute home prefix into '~' for clean UI display.
+    Works seamlessly across Linux (/home/username -> ~) and Windows (C:\\Users\\username -> ~).
+    """
+    if not path:
+        return ""
+    try:
+        home = str(Path.home())
+        p_str = str(path).strip()
+        if p_str == home:
+            return "~"
+        if p_str.startswith(home + "/") or p_str.startswith(home + "\\"):
+            return "~" + p_str[len(home):]
+    except Exception:
+        pass
+    return str(path)
+
+
+def resolve_save_path(base_dir: str, display_name: str, custom_save_folder: Optional[str] = None) -> str:
+    """
+    Resolves the final absolute filesystem save path for an anime show.
+    If custom_save_folder is provided, uses it (expanding ~, {name} if present, or resolving relative names).
+    Otherwise, applies display_name into base_dir template.
+    If base_dir is blank and no custom path is set, returns empty string "" so qBittorrent uses its default download location.
+    """
+    clean_name = sanitize_folder_name(display_name)
+
+    if custom_save_folder and custom_save_folder.strip():
+        raw = custom_save_folder.strip()
+        if "{name}" in raw:
+            raw = raw.replace("{name}", clean_name)
+        elif not raw.startswith("/") and not raw.startswith("~") and not (len(raw) > 2 and raw[1] == ":"):
+            # If user provided a relative subfolder (e.g. "Bleach Season 2")
+            base_template = base_dir.strip() if base_dir and base_dir.strip() else ""
+            if base_template:
+                base_prefix = base_template.replace("{name}", "").rstrip("/\\") if "{name}" in base_template else base_template.rstrip("/\\")
+                raw = f"{base_prefix}/{raw}"
+            else:
+                raw = clean_name
+        return str(Path(os.path.expanduser(raw)).resolve()) if (raw.startswith("/") or raw.startswith("~") or (len(raw) > 2 and raw[1] == ":")) else raw
+
+    # Base dir handling
+    if not base_dir or not base_dir.strip():
+        return ""
+
+    base_template = base_dir.strip()
+    if "{name}" in base_template:
+        expanded = base_template.replace("{name}", clean_name)
+    else:
+        expanded = str(Path(base_template) / clean_name)
+
+    return str(Path(os.path.expanduser(expanded)).resolve())
+
+
+def build_rule_name(monitored_id: int, display_name: str) -> str:
+    """Construct a clean, human-readable rule name for qBittorrent without ID clutter."""
+    clean_name = sanitize_folder_name(display_name)
+    return f"[Seasonal] {clean_name}"
+
+
+def is_show_rule_enabled(monitored: Monitored) -> bool:
+    """
+    Determine if a show's RSS rule in qBittorrent should be actively enabled.
+    - Paused or Completed shows: False
+    - Fixed (Working / Confirmed) shows: True
+    - Unconfirmed upcoming shows whose air date is in the future: False (prevents pre-air false positives)
+    - Unconfirmed shows that have aired / are in hunting mode: True
+    """
+    from qbit_seasonal_anime.db.models import MonitoredStatus, utc_now
+    from datetime import timezone
+
+    if monitored.status in (MonitoredStatus.PAUSED, MonitoredStatus.COMPLETED):
+        return False
+
+    if monitored.status == MonitoredStatus.FIXED:
+        return True
+
+    # UNCONFIRMED / STALLED check
+    now = utc_now()
+    air_at = monitored.next_airing_at
+    if air_at and air_at.tzinfo is None:
+        air_at = air_at.replace(tzinfo=timezone.utc)
+
+    # If premiere has not aired on Japanese TV yet (air date in future or TBA) and no previous episodes were confirmed
+    is_unreleased = (
+        (monitored.next_airing_episode == 1 or monitored.next_airing_episode is None)
+        and (air_at is None or air_at > now)
+        and (monitored.last_confirmed_episode or 0) == 0
+    )
+    if is_unreleased:
+        return False
+
+    return True
+
+
+def build_rule_definition(
+    monitored: Monitored,
+    feed_url: str,
+    base_dir: str,
+    category: str = "",
+    ratio_limit: float = 1.0,
+    release_group: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    must_contain: Optional[str] = None,
+    must_not_contain: Optional[str] = None,
+    title_language: str = "english",
+) -> Dict[str, Any]:
+    """Construct the JSON payload for qBittorrent's RSS rule definition."""
+    effective_group = release_group or monitored.matched_release_group
+    
+    # Priority: explicit argument -> stored custom regex -> auto-generated regex
+    regex = (
+        must_contain
+        if must_contain is not None
+        else (
+            getattr(monitored, "custom_regex", None)
+            or build_regex_pattern(
+                monitored.aliases,
+                matched_title=monitored.matched_title,
+                release_group=effective_group,
+            )
+        )
+    )
+
+    effective_display_name = (
+        monitored.title_english
+        if (title_language == "english" and monitored.title_english)
+        else (monitored.title_romaji or monitored.display_name)
+    )
+    save_path = resolve_save_path(base_dir, effective_display_name, monitored.save_folder)
+
+    default_must_not = r"(?i)(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
+    effective_must_not = (
+        must_not_contain
+        if must_not_contain is not None
+        else (getattr(monitored, "custom_must_not", None) or default_must_not)
+    )
+
+    is_enabled = is_show_rule_enabled(monitored) if enabled is None else enabled
+
+    rule_def = {
+        "enabled": is_enabled,
+        "mustContain": regex,
+        "mustNotContain": effective_must_not,
+        "useRegex": True,
+        "episodeFilter": "",
+        "smartFilter": True,
+        "previouslyMatchedEpisodes": [],
+        "affectedFeeds": [feed_url],
+        "ignoreDays": 0,
+        "lastMatch": "",
+        "addPaused": False,
+        "assignedCategory": category,
+        "savePath": save_path,
+        "ratioLimit": ratio_limit,
+        "torrentParams": {
+            "category": category,
+            "save_path": save_path,
+            "ratio_limit": ratio_limit,
+            "operating_mode": "AutoManaged",
+        },
+    }
+    return rule_def
+
+
+def create_or_update_rule(
+    qbit_client: QBitClient,
+    monitored: Monitored,
+    feed: Feed,
+    base_dir: str,
+    category: str = "",
+    ratio_limit: float = 1.0,
+    release_group: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    must_contain: Optional[str] = None,
+    must_not_contain: Optional[str] = None,
+    title_language: str = "english",
+) -> str:
+    """Create or update a qBittorrent RSS rule and return the rule name."""
+    if category:
+        qbit_client.ensure_category_exists(category)
+
+    rule_name = monitored.qbit_rule_name or build_rule_name(monitored.id or 0, monitored.display_name)
+    rule_def = build_rule_definition(
+        monitored=monitored,
+        feed_url=feed.qbit_feed_url,
+        base_dir=base_dir,
+        category=category,
+        ratio_limit=ratio_limit,
+        release_group=release_group,
+        enabled=enabled,
+        must_contain=must_contain,
+        must_not_contain=must_not_contain,
+        title_language=title_language,
+    )
+
+    qbit_client.set_rss_rule(rule_name=rule_name, rule_def=rule_def)
+
+    # Sanity check: verify qBittorrent accepted the rule
+    try:
+        matched = qbit_client.get_matching_articles(rule_name)
+        match_count = sum(len(v) for v in matched.values()) if isinstance(matched, dict) else 0
+        logger.debug(f"Rule '{rule_name}' sanity check: qBittorrent matched {match_count} article(s).")
+    except Exception as e:
+        logger.debug(f"Rule '{rule_name}' matching articles check skipped: {e}")
+
+    return rule_name
+
+
+def delete_rule(qbit_client: QBitClient, rule_name: str) -> None:
+    """Remove a rule from qBittorrent."""
+    if not rule_name:
+        return
+    try:
+        qbit_client.remove_rss_rule(rule_name=rule_name)
+    except QbitClientError as e:
+        logger.warning(f"Could not delete rule '{rule_name}': {e}")
