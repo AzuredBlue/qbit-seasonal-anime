@@ -21,21 +21,21 @@ class TestRules(unittest.TestCase):
     def test_build_regex_pattern_broad(self):
         aliases = ["Sousou no Frieren", "Frieren: Beyond Journey's End"]
         pattern = build_regex_pattern(aliases)
-        self.assertTrue(pattern.startswith("(?i)("))
-        self.assertTrue(re.search(pattern, "[SubsPlease] Sousou no Frieren - 08 (1080p).mkv"))
-        self.assertTrue(re.search(pattern, "[Erai-raws] Frieren: Beyond Journey's End - 08.mkv"))
-        self.assertFalse(re.search(pattern, "[SubsPlease] Dandadan - 01.mkv"))
+        self.assertTrue(pattern.startswith("("))
+        self.assertTrue(re.search(pattern, "[SubsPlease] Sousou no Frieren - 08 (1080p).mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[Erai-raws] Frieren: Beyond Journey's End - 08.mkv", re.IGNORECASE))
+        self.assertFalse(re.search(pattern, "[SubsPlease] Dandadan - 01.mkv", re.IGNORECASE))
 
     def test_build_regex_pattern_simple_matched_title(self):
         pattern = build_regex_pattern(
             aliases=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season", "Mushoku Tensei S3"],
             matched_title="Mushoku Tensei S3",
         )
-        self.assertEqual(pattern, r"(?i)Mushoku\s+Tensei\s+S3")
-        self.assertTrue(re.search(pattern, "[SubsPlease] Mushoku Tensei S3 - 09 (1080p) [DDF202A0].mkv"))
-        self.assertTrue(re.search(pattern, "Mushoku Tensei S3 - 09 (1080p) [Varyg].mkv"))
-        self.assertTrue(re.search(pattern, "[Erai-raws] Mushoku Tensei S3 - 09 (1080p).mkv"))
-        self.assertFalse(re.search(pattern, "[SubsPlease] Bleach - 45.mkv"))
+        self.assertEqual(pattern, r"Mushoku\s+Tensei\s+S3")
+        self.assertTrue(re.search(pattern, "[SubsPlease] Mushoku Tensei S3 - 09 (1080p) [DDF202A0].mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "Mushoku Tensei S3 - 09 (1080p) [Varyg].mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[Erai-raws] Mushoku Tensei S3 - 09 (1080p).mkv", re.IGNORECASE))
+        self.assertFalse(re.search(pattern, "[SubsPlease] Bleach - 45.mkv", re.IGNORECASE))
 
     def test_build_rule_definition(self):
         show = Monitored(
@@ -55,7 +55,7 @@ class TestRules(unittest.TestCase):
         )
         self.assertTrue(rule_def["enabled"])
         self.assertTrue(rule_def["useRegex"])
-        self.assertTrue(rule_def["smartFilter"])
+        self.assertFalse(rule_def["smartFilter"])
         self.assertIn("720p", rule_def["mustNotContain"])
         self.assertIn("batch", rule_def["mustNotContain"])
         self.assertEqual(rule_def["affectedFeeds"], ["https://subsplease.org/rss/?r=1080"])

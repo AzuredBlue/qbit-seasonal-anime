@@ -70,12 +70,12 @@ def build_regex_pattern(
     """
     Build a clean, minimal case-insensitive regex pattern for qBittorrent RSS rules.
     If matched_title is known (e.g. verified during confirmation/discovery), creates a precise
-    and simple rule using ONLY that matched title (e.g. '(?i)Mushoku\\s+Tensei\\s+S3').
+    and simple rule using ONLY that matched title (e.g. 'Mushoku\\s+Tensei\\s+S3').
     """
     # 1. Simple, clean matched title rule (Works / Confirmed state)
     if matched_title and matched_title.strip():
         token = sanitize_regex_token(matched_title)
-        return rf"(?i){token}"
+        return rf"{token}"
 
     # 2. Fallback for unconfirmed / unreleased shows before first match:
     # Filter to clean English / Romaji / Latin aliases to keep rule minimal
@@ -94,7 +94,7 @@ def build_regex_pattern(
     unique_tokens = list(dict.fromkeys(tokens))
     alternation = "|".join(unique_tokens)
 
-    return rf"(?i)({alternation})"
+    return rf"({alternation})"
 
 
 def sanitize_folder_name(name: str) -> str:
@@ -256,7 +256,7 @@ def build_rule_definition(
     )
     save_path = resolve_save_path(base_dir, effective_display_name, monitored.save_folder)
 
-    default_must_not = r"(?i)(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
+    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
     effective_must_not = (
         must_not_contain
         if must_not_contain is not None
@@ -271,7 +271,7 @@ def build_rule_definition(
         "mustNotContain": effective_must_not,
         "useRegex": True,
         "episodeFilter": "",
-        "smartFilter": True,
+        "smartFilter": False,
         "previouslyMatchedEpisodes": [],
         "affectedFeeds": [feed_url],
         "ignoreDays": 0,

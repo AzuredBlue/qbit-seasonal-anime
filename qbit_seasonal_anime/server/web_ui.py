@@ -397,6 +397,7 @@ def get_web_ui_html() -> HTMLResponse:
     let currentSettings = {};
     let activeTab = 'shows';
     let currentInspectedShowId = null;
+    let modalInitialState = null;
 
     // High contrast, solid color tags for maximum legibility on any image
     const STATUS_CONFIG = {
@@ -991,7 +992,7 @@ def get_web_ui_html() -> HTMLResponse:
           <!-- Must Not Contain Filter (Editable Regex) -->
           <div class="space-y-1">
             <label for="modal-must-not-contain" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">Must Not Contain Filter</label>
-            <input type="text" id="modal-must-not-contain" value="${data.must_not_contain || ''}" placeholder="(?i)(720p|480p|...)" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-zinc-300 focus:outline-none focus:border-zinc-500 shadow-inner select-all">
+            <input type="text" id="modal-must-not-contain" value="${data.must_not_contain || ''}" placeholder="(720p|480p|...)" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-zinc-300 focus:outline-none focus:border-zinc-500 shadow-inner select-all">
           </div>
         ` : `
           <div class="bg-[#121215] border border-[#2a2a34] rounded-lg p-3 text-center">
@@ -1050,6 +1051,14 @@ def get_web_ui_html() -> HTMLResponse:
 
           ${articlesSection}
         `;
+        modalInitialState = {
+          current_feed_id: data.current_feed_id || 0,
+          save_folder: (data.save_path || data.save_folder || '').trim(),
+          category: (data.category || '').trim(),
+          ratio_limit: data.ratio_limit !== undefined && data.ratio_limit !== null ? parseFloat(data.ratio_limit) : undefined,
+          must_contain: (data.must_contain || '').trim(),
+          must_not_contain: (data.must_not_contain || '').trim(),
+        };
       } catch (err) {
         contentEl.innerHTML = `<div class="text-rose-400 py-4 text-center">Failed loading show details: ${err}</div>`;
       }
@@ -1058,13 +1067,11 @@ def get_web_ui_html() -> HTMLResponse:
     function closeRuleModal() {
       document.getElementById('rule-modal').classList.add('hidden');
       currentInspectedShowId = null;
+      modalInitialState = null;
     }
 
     async function saveShowModal() {
       if (!currentInspectedShowId) return;
-      const btn = document.getElementById('btn-save-show-modal');
-      btn.disabled = true;
-      btn.textContent = 'Saving...';
 
       const feedSelect = document.getElementById('modal-feed-id');
       const savePathInput = document.getElementById('modal-save-path');
@@ -1073,13 +1080,40 @@ def get_web_ui_html() -> HTMLResponse:
       const mustContainInput = document.getElementById('modal-must-contain');
       const mustNotContainInput = document.getElementById('modal-must-not-contain');
 
+      const currentFeedId = feedSelect ? parseInt(feedSelect.value) : 0;
+      const currentSaveFolder = savePathInput ? savePathInput.value.trim() : '';
+      const currentCategory = categoryInput ? categoryInput.value.trim() : '';
+      const currentRatio = ratioInput && ratioInput.value !== '' ? parseFloat(ratioInput.value) : undefined;
+      const currentMustContain = mustContainInput ? mustContainInput.value.trim() : '';
+      const currentMustNotContain = mustNotContainInput ? mustNotContainInput.value.trim() : '';
+
+      // Check if anything was actually modified
+      const hasChanged = !modalInitialState || (
+        currentFeedId !== modalInitialState.current_feed_id ||
+        currentSaveFolder !== modalInitialState.save_folder ||
+        currentCategory !== modalInitialState.category ||
+        currentRatio !== modalInitialState.ratio_limit ||
+        currentMustContain !== modalInitialState.must_contain ||
+        currentMustNotContain !== modalInitialState.must_not_contain
+      );
+
+      if (!hasChanged) {
+        // Nothing changed: close immediately without making API calls or showing notifications
+        closeRuleModal();
+        return;
+      }
+
+      const btn = document.getElementById('btn-save-show-modal');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+
       const payload = {
-        current_feed_id: feedSelect ? parseInt(feedSelect.value) : undefined,
-        save_folder: savePathInput ? savePathInput.value.trim() : undefined,
-        category: categoryInput ? categoryInput.value.trim() : undefined,
-        ratio_limit: ratioInput && ratioInput.value !== '' ? parseFloat(ratioInput.value) : undefined,
-        must_contain: mustContainInput ? mustContainInput.value.trim() : undefined,
-        must_not_contain: mustNotContainInput ? mustNotContainInput.value.trim() : undefined,
+        current_feed_id: currentFeedId,
+        save_folder: currentSaveFolder || undefined,
+        category: currentCategory || undefined,
+        ratio_limit: currentRatio,
+        must_contain: currentMustContain || undefined,
+        must_not_contain: currentMustNotContain || undefined,
       };
 
       try {

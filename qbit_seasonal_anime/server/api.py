@@ -251,7 +251,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
     is_custom_folder = bool(show.save_folder and show.save_folder != sanitize_folder_name(show.display_name) and show.save_folder != sanitize_folder_name(show.title_romaji or "") and show.save_folder != sanitize_folder_name(show.title_english or ""))
     default_save_path = resolve_save_path(settings.base_dir, effective_display_name, show.save_folder if is_custom_folder else None)
     raw_save_path = qbit_rule_data.get("savePath") or default_save_path
-    default_must_not = r"(?i)(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
+    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
 
     return {
         "show_id": show.id,
