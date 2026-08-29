@@ -121,9 +121,27 @@ def get_web_ui_html() -> HTMLResponse:
         
         <!-- SECTION 1: RELEASING -->
         <div id="section-releasing" class="space-y-3">
-          <div class="flex items-center gap-2 border-b border-[#222228] pb-1.5">
-            <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Releasing</h2>
-            <span id="header-count-releasing" class="text-xs text-zinc-500 font-mono">(0)</span>
+          <div class="flex items-center justify-between border-b border-[#222228] pb-1.5">
+            <div class="flex items-center gap-2">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Releasing</h2>
+              <span id="header-count-releasing" class="text-xs text-zinc-500 font-mono">(0)</span>
+            </div>
+
+            <!-- Sleek Segmented Sort Control -->
+            <div class="flex items-center gap-1 bg-[#121215] p-0.5 rounded border border-[#26262e] text-[11px] font-mono">
+              <button onclick="setSortMode('airing')" id="sort-btn-airing" class="px-2 py-0.5 rounded flex items-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200" title="Sort by Next Episode Airing (Soonest first)">
+                <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span>Airing</span>
+              </button>
+              <button onclick="setSortMode('title')" id="sort-btn-title" class="px-2 py-0.5 rounded flex items-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200" title="Sort Alphabetically (A to Z)">
+                <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12"/></svg>
+                <span>A-Z</span>
+              </button>
+              <button onclick="setSortMode('default')" id="sort-btn-default" class="px-2 py-0.5 rounded flex items-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200" title="Default Order (Date added)">
+                <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+                <span>Default</span>
+              </button>
+            </div>
           </div>
           <!-- Enlarged card grid with smooth hover transition -->
           <div id="grid-releasing" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4">
@@ -494,9 +512,55 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
+    let currentSortMode = localStorage.getItem('show_sort_mode') || 'airing';
+
+    function setSortMode(mode) {
+      currentSortMode = mode;
+      localStorage.setItem('show_sort_mode', mode);
+      updateSortButtonStyles();
+      renderShows();
+    }
+
+    function updateSortButtonStyles() {
+      const modes = ['airing', 'title', 'default'];
+      modes.forEach(m => {
+        const btn = document.getElementById(`sort-btn-${m}`);
+        if (!btn) return;
+        const svg = btn.querySelector('svg');
+        if (m === currentSortMode) {
+          btn.className = 'px-2 py-0.5 rounded flex items-center gap-1.5 transition-all bg-[#26262e] text-indigo-400 font-semibold shadow-sm';
+          if (svg) svg.className = 'w-3.5 h-3.5 text-indigo-400';
+        } else {
+          btn.className = 'px-2 py-0.5 rounded flex items-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200 hover:bg-[#18181c]';
+          if (svg) svg.className = 'w-3.5 h-3.5 text-zinc-400';
+        }
+      });
+    }
+
+    function sortShowsList(list) {
+      const copy = [...list];
+      if (currentSortMode === 'airing') {
+        copy.sort((a, b) => {
+          const aTime = a.next_airing_at ? new Date(a.next_airing_at).getTime() : Infinity;
+          const bTime = b.next_airing_at ? new Date(b.next_airing_at).getTime() : Infinity;
+          if (aTime !== bTime) {
+            return aTime - bTime; // Soonest air date first
+          }
+          return (a.display_name || '').localeCompare(b.display_name || '');
+        });
+      } else if (currentSortMode === 'title') {
+        copy.sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
+      } else {
+        // default / id order
+        copy.sort((a, b) => (a.id || 0) - (b.id || 0));
+      }
+      return copy;
+    }
+
     function renderShows() {
-      const releasingShows = allShows.filter(s => s.is_released);
-      const plannedShows = allShows.filter(s => !s.is_released);
+      updateSortButtonStyles();
+      const releasingShows = sortShowsList(allShows.filter(s => s.is_released));
+      const plannedShows = sortShowsList(allShows.filter(s => !s.is_released));
 
       document.getElementById('badge-total-shows').textContent = allShows.length;
       document.getElementById('header-count-releasing').textContent = `(${releasingShows.length})`;
@@ -505,17 +569,45 @@ def get_web_ui_html() -> HTMLResponse:
       const gridReleasing = document.getElementById('grid-releasing');
       const gridPlanned = document.getElementById('grid-planned');
 
-      gridReleasing.innerHTML = releasingShows.map(createShowCardHtml).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No currently releasing anime.</div>';
-      gridPlanned.innerHTML = plannedShows.map(createShowCardHtml).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No planned upcoming anime.</div>';
+      gridReleasing.innerHTML = releasingShows.map(renderShowCard).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No currently releasing anime.</div>';
+      gridPlanned.innerHTML = plannedShows.map(renderShowCard).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No planned upcoming anime.</div>';
     }
 
-    function createShowCardHtml(show) {
-      const statusKey = (show.status || '').toUpperCase();
-      const isPaused = statusKey === 'PAUSED';
+    function formatEpisodeCountdown(targetDateStr) {
+      if (!targetDateStr) return null;
+      const target = new Date(targetDateStr).getTime();
+      const now = Date.now();
+      const diffSec = Math.floor((target - now) / 1000);
+
+      if (diffSec <= 0) {
+        return 'Aired';
+      }
+
+      const days = Math.floor(diffSec / 86400);
+      const hours = Math.floor((diffSec % 86400) / 3600);
+      const mins = Math.floor((diffSec % 3600) / 60);
+
+      if (days >= 7) {
+        return `${days}d`;
+      }
+      if (days > 0) {
+        return `${days}d ${hours}h`;
+      }
+      if (hours > 0) {
+        return `${hours}h ${mins}m`;
+      }
+      return `${Math.max(1, mins)}m`;
+    }
+
+    function renderShowCard(show) {
+      const rawStatus = (show.status || 'UNCONFIRMED').toUpperCase();
+      const isPaused = rawStatus === 'PAUSED';
+      const statusKey = isPaused ? ((show.status_before_pause || 'UNCONFIRMED').toUpperCase()) : rawStatus;
 
       let cfg = STATUS_CONFIG[statusKey] || STATUS_CONFIG['UNCONFIRMED'];
       let label = cfg.label;
-      if (statusKey === 'UNCONFIRMED') {
+
+      if (!isPaused && statusKey === 'UNCONFIRMED') {
         if (!show.is_released) {
           label = 'Upcoming';
           cfg = STATUS_CONFIG['UPCOMING'];
@@ -529,13 +621,20 @@ def get_web_ui_html() -> HTMLResponse:
       }
 
       let airInfo = '-';
-      if (statusKey === 'COMPLETED') airInfo = 'Completed';
-      else if (isPaused) airInfo = 'Paused';
-      else if (statusKey === 'STALLED') airInfo = 'Stalled';
-      else if (show.next_airing_episode && show.next_airing_formatted) airInfo = `Ep ${show.next_airing_episode} (${show.next_airing_formatted.split(' ')[0]})`;
-      else if (show.last_confirmed_episode) airInfo = `Ep ${show.last_confirmed_episode}`;
+      let countdownAttr = '';
+      if (show.next_airing_episode && show.next_airing_at) {
+        const cd = formatEpisodeCountdown(show.next_airing_at);
+        airInfo = `Ep ${show.next_airing_episode} (${cd || show.next_airing_formatted || ''})`;
+        countdownAttr = `data-air-at="${show.next_airing_at}" data-ep="${show.next_airing_episode}" data-date-str="${show.next_airing_formatted || ''}"`;
+      } else if (statusKey === 'COMPLETED') {
+        airInfo = 'Completed';
+      } else if (show.last_confirmed_episode) {
+        airInfo = `Ep ${show.last_confirmed_episode}`;
+      } else if (statusKey === 'STALLED') {
+        airInfo = 'Stalled';
+      }
 
-      const feedName = isPaused ? 'Paused' : (show.current_feed_name || '[None]');
+      const feedName = show.current_feed_name || '[None]';
 
       // Subtle, gentle grayscale and dimming for paused show (not too dark)
       const posterImg = show.cover_image 
@@ -602,7 +701,7 @@ def get_web_ui_html() -> HTMLResponse:
 
             <div class="pt-2 border-t border-[#222228] flex items-center justify-between gap-2.5 text-xs font-mono">
               <span class="truncate text-zinc-400 font-medium min-w-0" title="${feedName}">${feedName}</span>
-              <span class="flex-shrink-0 text-zinc-200 font-semibold ml-auto">${airInfo}</span>
+              <span class="show-countdown flex-shrink-0 text-zinc-200 font-semibold ml-auto" ${countdownAttr} title="${show.next_airing_formatted ? show.next_airing_formatted : ''}">${airInfo}</span>
             </div>
           </div>
 
@@ -1539,6 +1638,17 @@ def get_web_ui_html() -> HTMLResponse:
           }
         }
       }
+
+      // Live-update all show card countdown badges
+      document.querySelectorAll('.show-countdown[data-air-at]').forEach(el => {
+        const airAt = el.getAttribute('data-air-at');
+        const ep = el.getAttribute('data-ep');
+        const dateStr = el.getAttribute('data-date-str');
+        if (airAt && ep) {
+          const cd = formatEpisodeCountdown(airAt);
+          el.textContent = `Ep ${ep} (${cd || dateStr || ''})`;
+        }
+      });
     }
 
     async function updateStatus() {
@@ -1564,7 +1674,7 @@ def get_web_ui_html() -> HTMLResponse:
     loadShows();
     updateStatus();
     setInterval(updateStatus, 15000);
-    setInterval(tickCountdown, 1000);
+    setInterval(tickCountdown, 30000);
     toggleLogsAutoRefresh(true);
 
     // Global keyboard shortcuts (Escape saves and closes active show modal)
