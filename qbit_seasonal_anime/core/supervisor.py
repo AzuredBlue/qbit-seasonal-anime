@@ -37,7 +37,7 @@ class Supervisor:
         self.settings = settings
 
     def sync_feeds(self) -> List[str]:
-        """Fetch RSS feeds from qBittorrent and ensure they are registered in the database."""
+        """Fetch RSS feeds from qBittorrent and ensure they are registered in the database, pruning any removed feeds."""
         logs = []
         try:
             qbit_feeds = self.qbit.get_rss_feeds_flat()
@@ -45,26 +45,85 @@ class Supervisor:
             logger.warning(f"Could not sync RSS feeds from qBittorrent: {e}")
             return [f"Feed sync error: {e}"]
 
-        existing_feeds = {f.qbit_feed_url: f for f in self.session.exec(select(Feed)).all()}
-        next_priority = len(existing_feeds) + 1
-        added = 0
+        db_feeds = self.session.exec(select(Feed).order_by(Feed.priority)).all()
+        existing_feeds_by_url = {f.qbit_feed_url: f for f in db_feeds}
+        qbit_urls = {qf["url"]: qf["name"] for qf in qbit_feeds}
 
+        added = 0
+        removed = 0
+        renamed = 0
+
+        # 1. Remove feeds from DB that were deleted from qBittorrent
+        for url, f in list(existing_feeds_by_url.items()):
+            if url not in qbit_urls:
+                # Unassign any shows currently pointing to this deleted feed
+                shows_on_feed = self.session.exec(
+                    select(Monitored).where(Monitored.current_feed_id == f.id)
+                ).all()
+                for show in shows_on_feed:
+                    show.current_feed_id = None
+                    if show.status == MonitoredStatus.FIXED:
+                        show.status = MonitoredStatus.UNCONFIRMED
+                    self.session.add(show)
+
+                # Nullify any history references
+                hist_on_feed = self.session.exec(
+                    select(RuleHistory).where(RuleHistory.feed_id == f.id)
+                ).all()
+                for h in hist_on_feed:
+                    h.feed_id = None
+                    self.session.add(h)
+
+                self.session.delete(f)
+                del existing_feeds_by_url[url]
+                removed += 1
+                logs.append(f"Removed deleted qBit RSS feed: '{f.qbit_feed_name}'")
+
+        # 2. Add newly discovered feeds or update names
+        next_priority = len(existing_feeds_by_url) + 1
         for qf in qbit_feeds:
             url = qf["url"]
             name = qf["name"]
-            if url not in existing_feeds:
+            if url not in existing_feeds_by_url:
                 new_feed = Feed(qbit_feed_name=name, qbit_feed_url=url, priority=next_priority)
                 self.session.add(new_feed)
-                existing_feeds[url] = new_feed
+                existing_feeds_by_url[url] = new_feed
                 next_priority += 1
                 added += 1
                 logs.append(f"Discovered new qBit RSS feed: '{name}' (Priority {new_feed.priority})")
+            else:
+                existing_feed = existing_feeds_by_url[url]
+                if existing_feed.qbit_feed_name != name:
+                    existing_feed.qbit_feed_name = name
+                    self.session.add(existing_feed)
+                    renamed += 1
+
+        self.session.flush()
+
+        # 3. Compact priorities so there are no gaps (e.g. 1, 2, 4 -> 1, 2, 3)
+        remaining_feeds = list(existing_feeds_by_url.values())
+        remaining_feeds.sort(key=lambda x: x.priority)
+        for idx, feed_item in enumerate(remaining_feeds, start=1):
+            if feed_item.priority != idx:
+                feed_item.priority = idx
+                self.session.add(feed_item)
 
         self.session.commit()
+
+        total = len(existing_feeds_by_url)
+        summary_parts = []
         if added > 0:
-            logs.append(f"Registered {added} new RSS feeds (Total: {len(existing_feeds)}).")
+            summary_parts.append(f"added {added}")
+        if removed > 0:
+            summary_parts.append(f"removed {removed}")
+        if renamed > 0:
+            summary_parts.append(f"updated {renamed}")
+
+        if summary_parts:
+            logs.append(f"Synchronized RSS feeds: {', '.join(summary_parts)} (Total: {total}).")
         else:
-            logs.append(f"Verified {len(existing_feeds)} RSS feeds configured in qBittorrent.")
+            logs.append(f"Verified {total} RSS feeds configured in qBittorrent.")
+
         return logs
 
     def bootstrap_unassigned_shows(self) -> List[str]:
