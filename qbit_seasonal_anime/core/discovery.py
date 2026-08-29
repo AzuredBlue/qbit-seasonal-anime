@@ -9,10 +9,27 @@ from qbit_seasonal_anime.db.models import Feed, Monitored
 logger = logging.getLogger("qbit_seasonal_anime.core.discovery")
 
 
+from email.utils import parsedate_to_datetime
+
+
+def parse_article_date(art: Dict[str, Any]) -> datetime:
+    d = art.get("date")
+    if not d:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = parsedate_to_datetime(d)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def flatten_rss_articles(rss_tree: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     """
     Parse qBittorrent RSS item tree into a mapping:
     { feed_url: [ { "title": ..., "torrentURL": ..., ... }, ... ] }
+    Articles are sorted newest-to-oldest by publication date.
     """
     feed_articles: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -22,7 +39,11 @@ def flatten_rss_articles(rss_tree: Dict[str, Any]) -> Dict[str, List[Dict[str, A
                 if "url" in val:
                     feed_url = val["url"]
                     articles = val.get("articles") or []
-                    feed_articles[feed_url] = articles
+                    if isinstance(articles, list):
+                        sorted_articles = sorted(articles, key=parse_article_date, reverse=True)
+                    else:
+                        sorted_articles = []
+                    feed_articles[feed_url] = sorted_articles
                 else:
                     traverse(val)
 

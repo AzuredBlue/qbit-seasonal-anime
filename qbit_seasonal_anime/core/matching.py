@@ -325,14 +325,31 @@ def match_release_to_show(
     """
     Evaluate if an RSS item or torrent matches an anime show.
     Rejects batches and lower resolutions (480p, 720p).
+    Strictly matches against the show's Testing Regex pattern to ensure only true releases match.
     Returns (is_match, score, parsed_metadata).
     """
     parsed = parse_release_title(raw_title)
     if not is_valid_release(raw_title):
         return False, 0.0, parsed
 
-    parsed_title = parsed.get("title", "")
-    score, _ = calculate_match_score(parsed_title, aliases)
+    # 1. Primary: Match against the show's Testing Regex
+    from qbit_seasonal_anime.core.rules import build_regex_pattern
+    test_pattern = build_regex_pattern(aliases)
+    try:
+        m = re.search(test_pattern, raw_title, flags=re.IGNORECASE)
+        if m:
+            matched_token = m.group(0).strip()
+            if matched_token:
+                parsed["title"] = matched_token
+            return True, 100.0, parsed
+    except Exception as e:
+        logger.debug(f"Testing regex match error: {e}")
 
+    # 2. Secondary: Fuzzy fallback for minor spelling / punctuation variations
+    parsed_title = parsed.get("title", "")
+    score, best_alias = calculate_match_score(parsed_title, aliases)
     is_match = score >= threshold
+    if is_match and best_alias:
+        parsed["title"] = best_alias
+
     return is_match, score, parsed

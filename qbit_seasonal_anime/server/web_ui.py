@@ -1107,13 +1107,16 @@ def get_web_ui_html() -> HTMLResponse:
       btn.disabled = true;
       btn.textContent = 'Saving...';
 
+      const isRegexChanged = modalInitialState && currentMustContain !== modalInitialState.must_contain;
+      const isMustNotChanged = modalInitialState && currentMustNotContain !== modalInitialState.must_not_contain;
+
       const payload = {
         current_feed_id: currentFeedId,
         save_folder: currentSaveFolder || undefined,
         category: currentCategory || undefined,
         ratio_limit: currentRatio,
-        must_contain: currentMustContain || undefined,
-        must_not_contain: currentMustNotContain || undefined,
+        must_contain: isRegexChanged ? currentMustContain : undefined,
+        must_not_contain: isMustNotChanged ? currentMustNotContain : undefined,
       };
 
       try {

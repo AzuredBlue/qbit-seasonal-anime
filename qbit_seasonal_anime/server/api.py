@@ -345,21 +345,27 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         articles_by_feed = flatten_rss_articles(rss_data)
         feed_articles = articles_by_feed.get(feed.qbit_feed_url, [])
 
-        from qbit_seasonal_anime.core.matching import match_release_to_show, parse_release_title
+        from qbit_seasonal_anime.core.matching import match_release_to_show
+        best_art = None
+        best_parsed = None
+        best_score = 0
         for art in feed_articles:
             is_match, score, parsed_info = match_release_to_show(art.get("title", ""), show.aliases)
-            if is_match:
-                matched_article = art
-                break
+            if is_match and score > best_score:
+                best_score = score
+                best_art = art
+                best_parsed = parsed_info
+        matched_article = best_art
     except Exception as e:
         state.add_log(f"Warning searching feed cache: {e}", "WARNING")
 
     from qbit_seasonal_anime.core.rules import create_or_update_rule
-    if matched_article:
-        parsed = parse_release_title(matched_article.get("title", ""))
-        show.matched_title = parsed.get("title")
-        show.matched_release_group = parsed.get("release_group")
+    if matched_article and best_parsed:
+        show.matched_title = best_parsed.get("title")
+        show.matched_release_group = best_parsed.get("release_group")
         show.status = MonitoredStatus.FIXED
+        if req.must_contain is None:
+            show.custom_regex = None
         rname = create_or_update_rule(
             qbit_client=qbit,
             monitored=show,
