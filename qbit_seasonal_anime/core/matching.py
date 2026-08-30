@@ -345,11 +345,8 @@ def match_release_to_show(
     except Exception as e:
         logger.debug(f"Testing regex match error: {e}")
 
-    # 2. Secondary: Fuzzy fallback for minor spelling / punctuation variations
+    # 2. Secondary: Fuzzy fallback for minor spelling / punctuation / continuous season numbering
     parsed_title = parsed.get("title", "")
     score, best_alias = calculate_match_score(parsed_title, aliases)
     is_match = score >= threshold
-    if is_match and best_alias:
-        parsed["title"] = best_alias
-
     return is_match, score, parsed
