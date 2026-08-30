@@ -56,10 +56,13 @@ def generate_season_variants(alias: str) -> List[str]:
 
 
 def sanitize_regex_token(title: str) -> str:
-    """Escape special regex characters and normalize spaces."""
-    words = title.strip().split()
-    escaped_words = [re.escape(w) for w in words]
-    return r"\s+".join(escaped_words)
+    """Escape true regex metacharacters while keeping spaces and hyphens clean and human-readable."""
+    if not title:
+        return ""
+    # Escape only characters with special regex meaning outside brackets: () [] {} + * ? ^ $ | . \
+    escaped = re.sub(r"([\\^$.|?*+()\[\]{}])", r"\\\1", title.strip())
+    # Normalize multiple whitespaces down to a single clean space
+    return re.sub(r"\s+", " ", escaped)
 
 
 def build_regex_pattern(

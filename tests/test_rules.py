@@ -31,7 +31,7 @@ class TestRules(unittest.TestCase):
             aliases=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season", "Mushoku Tensei S3"],
             matched_title="Mushoku Tensei S3",
         )
-        self.assertEqual(pattern, r"Mushoku\s+Tensei\s+S3")
+        self.assertEqual(pattern, "Mushoku Tensei S3")
         self.assertTrue(re.search(pattern, "[SubsPlease] Mushoku Tensei S3 - 09 (1080p) [DDF202A0].mkv", re.IGNORECASE))
         self.assertTrue(re.search(pattern, "Mushoku Tensei S3 - 09 (1080p) [Varyg].mkv", re.IGNORECASE))
         self.assertTrue(re.search(pattern, "[Erai-raws] Mushoku Tensei S3 - 09 (1080p).mkv", re.IGNORECASE))
