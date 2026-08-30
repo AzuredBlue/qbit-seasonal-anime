@@ -189,15 +189,15 @@ class AniListClient:
                 next_airing = media.get("nextAiringEpisode")
 
                 # Strictly filter:
-                # 1. Currently releasing (status == RELEASING or has nextAiringEpisode)
-                # 2. Upcoming show for next season (or upcoming in current season)
-                is_currently_releasing = (status == "RELEASING") or (next_airing is not None)
-                is_next_season_planned = (
+                # 1. Currently releasing anime (status == RELEASING)
+                # 2. Upcoming show for next season (or unreleased in current season)
+                is_currently_releasing = (status == "RELEASING")
+                is_current_or_next_season_planned = (
                     (season == next_season and season_year == next_year) or
                     (season == cur_season and season_year == cur_year and status == "NOT_YET_RELEASED")
                 )
 
-                if not (is_currently_releasing or is_next_season_planned):
+                if not (is_currently_releasing or is_current_or_next_season_planned):
                     continue
 
                 # Build alias list

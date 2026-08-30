@@ -55,6 +55,16 @@ async def test_fetch_user_seasonal_anime_filtering():
                                 "nextAiringEpisode": None,
                             }
                         },
+                        {
+                            "media": {
+                                "id": 4,
+                                "title": {"romaji": "Far Future Planned Show (2+ Seasons Away)"},
+                                "status": "NOT_YET_RELEASED",
+                                "season": "WINTER",
+                                "seasonYear": 2027,
+                                "nextAiringEpisode": {"episode": 1, "airingAt": 1800000000},
+                            }
+                        },
                     ]
                 }
             ]
@@ -66,6 +76,7 @@ async def test_fetch_user_seasonal_anime_filtering():
         mock_post.return_value = payload
 
         shows = await client.fetch_user_seasonal_anime("TestUser")
-        # Should only include show 1 and show 2, filtering out show 3!
+        # Should only include show 1 (currently releasing) and show 2 (upcoming next season),
+        # strictly filtering out show 3 (finished) and show 4 (future season beyond next season)!
         assert len(shows) == 2
         assert {s["anilist_id"] for s in shows} == {1, 2}
