@@ -255,3 +255,39 @@ def test_title_language_setting_switch(client, session):
     assert s_en["display_name"] == "The Apothecary Diaries"
 
 
+def test_get_show_rule_auto_confirms_when_matching_article_present(client, session, mock_qbit):
+    feed = Feed(id=2, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=6001,
+        display_name="Yomi no Tsugai",
+        aliases_json='["Yomi no Tsugai"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        qbit_rule_name="[Seasonal] Yomi no Tsugai",
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    mock_qbit.get_rss_rules.return_value = {
+        "[Seasonal] Yomi no Tsugai": {"enabled": True, "mustContain": "(Yomi\\s+no\\s+Tsugai)"}
+    }
+    mock_qbit.get_matching_articles.return_value = {
+        "https://subsplease.org/rss": ["[SubsPlease] Yomi no Tsugai - 22 (1080p) [3B57467D].mkv"]
+    }
+
+    res = client.get(f"/api/shows/{show.id}/rule")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "fixed"
+    assert len(data["matched_articles"]) == 1
+
+    session.expire_all()
+    updated_show = session.get(Monitored, show.id)
+    assert updated_show.status == MonitoredStatus.FIXED
+    assert updated_show.last_confirmed_episode == 22
+    assert updated_show.matched_release_group == "SubsPlease"
+
+
+

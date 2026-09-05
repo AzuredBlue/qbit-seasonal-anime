@@ -240,6 +240,57 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning matching against cached articles: {e}", "DEBUG")
 
+    # If show was UNCONFIRMED but matching articles exist, auto-confirm to Working immediately
+    if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
+        from qbit_seasonal_anime.core.matching import match_release_to_show
+        best_ep = None
+        best_title = None
+        best_parsed = None
+        for title in matched_articles:
+            is_match, score, parsed = match_release_to_show(title, show.aliases)
+            if is_match:
+                ep = parsed.get("episode")
+                if ep is not None:
+                    if best_ep is None or ep > best_ep:
+                        best_ep = ep
+                        best_title = title
+                        best_parsed = parsed
+
+        if best_ep is not None and best_parsed:
+            show.last_confirmed_episode = max(show.last_confirmed_episode or 0, best_ep)
+            show.matched_title = best_parsed.get("title")
+            show.matched_release_group = best_parsed.get("release_group")
+            show.status = MonitoredStatus.FIXED
+
+            hist_stmt = (
+                select(RuleHistory)
+                .where(RuleHistory.monitored_id == show.id)
+                .order_by(RuleHistory.created_at.desc())
+            )
+            latest_hist = session.exec(hist_stmt).first()
+            if latest_hist and latest_hist.outcome == RuleOutcome.PENDING:
+                latest_hist.outcome = RuleOutcome.CONFIRMED
+                latest_hist.note = f"Verified with RSS release: {best_title}"
+                session.add(latest_hist)
+
+            from qbit_seasonal_anime.core.rules import create_or_update_rule
+            try:
+                create_or_update_rule(
+                    qbit_client=qbit,
+                    monitored=show,
+                    feed=feed,
+                    base_dir=settings.base_dir,
+                    category=settings.default_category,
+                    ratio_limit=settings.default_seed_ratio,
+                    release_group=show.matched_release_group,
+                )
+            except Exception as e:
+                state.add_log(f"Warning tightening rule in qBittorrent: {e}", "WARNING")
+
+            session.add(show)
+            session.commit()
+            state.add_log(f"Auto-confirmed rule for '{show.display_name}' (Ep {best_ep}) via '{best_title}' -> Works", "INFO")
+
     prefer_english = (getattr(settings, "title_language", "english") == "english")
     effective_display_name = show.title_english if (prefer_english and show.title_english) else (show.title_romaji or show.display_name)
 

@@ -65,7 +65,16 @@ def calculate_next_poll_interval(
             else:
                 unresolved_upcoming.append((airing_at, s))
         elif s.status == MonitoredStatus.UNCONFIRMED:
-            if airing_at <= now:
+            is_near = (airing_at <= now)
+            if not is_near and (s.next_airing_episode or 1) > 1:
+                # If an episode aired in the last 24 hours and hasn't been confirmed yet, stay in hunting mode
+                from datetime import timedelta
+                previous_air = airing_at - timedelta(days=7)
+                expected_ep = (s.next_airing_episode or 1) - 1
+                if (now - previous_air) <= timedelta(hours=24) and (s.last_confirmed_episode or 0) < expected_ep:
+                    is_near = True
+
+            if is_near:
                 hunting_shows.append(s)
             else:
                 unresolved_upcoming.append((airing_at, s))

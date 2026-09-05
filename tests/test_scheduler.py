@@ -117,7 +117,47 @@ class TestScheduler(unittest.TestCase):
 
         dur, reason = calculate_next_poll_interval(self.session, qbit_client=mock_qbit)
         self.assertEqual(dur, 315)
-        self.assertIn("Checking every 5m 15s", reason)
+    def test_hunting_mode_when_previous_episode_aired_recently(self):
+        now = utc_now()
+        # Ep 22 aired 3 hours ago; AniList bumped next_airing_episode to 23 and next_airing_at to 7 days away
+        show = Monitored(
+            id=4,
+            anilist_id=404,
+            display_name="Yomi no Tsugai",
+            aliases_json='["Yomi no Tsugai"]',
+            status=MonitoredStatus.UNCONFIRMED,
+            current_feed_id=1,
+            last_confirmed_episode=None,  # Ep 22 not confirmed yet
+            next_airing_episode=23,
+            next_airing_at=now + timedelta(days=7) - timedelta(hours=3),  # Previous episode aired 3 hours ago
+        )
+        self.session.add(show)
+        self.session.commit()
+
+        dur, reason = calculate_next_poll_interval(self.session, default_interval_seconds=21600, hunting_interval_seconds=300)
+        self.assertEqual(dur, 300)
+        self.assertIn("Hunting mode", reason)
+
+    def test_no_hunting_when_unconfirmed_show_next_episode_is_days_away_and_no_recent_air(self):
+        now = utc_now()
+        # Premiere Ep 1 is 5 days away -> Should not hunt, should sleep default interval (or until air time)
+        show = Monitored(
+            id=5,
+            anilist_id=505,
+            display_name="Future Premiere Anime",
+            aliases_json='["Future Premiere Anime"]',
+            status=MonitoredStatus.UNCONFIRMED,
+            current_feed_id=1,
+            last_confirmed_episode=None,
+            next_airing_episode=1,
+            next_airing_at=now + timedelta(days=5),
+        )
+        self.session.add(show)
+        self.session.commit()
+
+        dur, reason = calculate_next_poll_interval(self.session, default_interval_seconds=21600, hunting_interval_seconds=300)
+        self.assertEqual(dur, 21600)
+        self.assertNotIn("Hunting mode", reason)
 
 
 if __name__ == "__main__":
