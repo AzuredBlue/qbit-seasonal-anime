@@ -110,3 +110,18 @@ class RuleHistory(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now)
     outcome: RuleOutcome = Field(default=RuleOutcome.PENDING, index=True)
     note: Optional[str] = Field(default=None, nullable=True)
+
+
+class MatchHistory(SQLModel, table=True):
+    __tablename__ = "match_history"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    monitored_id: Optional[int] = Field(default=None, foreign_key="monitored.id", ondelete="SET NULL", nullable=True, index=True)
+    show_name: str = Field(index=True)
+    rule_name: str
+    feed_name: Optional[str] = None
+    release_title: str = Field(index=True)
+    episode: Optional[int] = None
+    created_at: datetime = Field(default_factory=utc_now, index=True)
+    matched_regex: Optional[str] = Field(default=None, nullable=True)
+

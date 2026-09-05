@@ -61,7 +61,14 @@ def get_web_ui_html() -> HTMLResponse:
         <span id="badge-calendar-shows" class="ml-auto text-xs text-zinc-400 font-mono font-semibold">0</span>
       </button>
 
+      <button onclick="switchTab('history')" id="nav-history" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors text-zinc-400 hover:text-zinc-200 hover:bg-[#202026]">
+        <svg class="w-5 h-5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <span>History</span>
+        <span id="badge-total-history" class="ml-auto text-xs text-zinc-400 font-mono font-semibold">0</span>
+      </button>
+
       <button onclick="switchTab('feeds')" id="nav-feeds" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors text-zinc-400 hover:text-zinc-200 hover:bg-[#202026]">
+
         <svg class="w-5 h-5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 5c7.18 0 13 5.82 13 13M6 11a7 7 0 017 7m-6 0a1 1 0 11-2 0 1 1 0 012 0z"/></svg>
         <span>RSS Feeds</span>
       </button>
@@ -181,6 +188,27 @@ def get_web_ui_html() -> HTMLResponse:
           <!-- Rendered by JS -->
         </div>
 
+      </section>
+
+      <section id="tab-history" class="space-y-4 max-w-5xl hidden">
+        <div class="flex items-center justify-between border-b border-[#222228] pb-3">
+          <div>
+            <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-200">Match History</h2>
+            <p class="text-xs text-zinc-400 mt-0.5">Recorded releases matched by rules in qBittorrent</p>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <button onclick="loadHistory(true)" class="bg-[#1e1e24] hover:bg-[#282832] text-zinc-300 text-xs py-1.5 px-3 rounded-lg border border-[#30303c] transition-colors font-medium flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              <span>Refresh</span>
+            </button>
+            <button onclick="clearHistory()" class="bg-[#1e1e24] hover:bg-[#282832] text-zinc-400 hover:text-rose-400 text-xs py-1.5 px-3 rounded-lg border border-[#30303c] transition-colors font-medium">
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div id="history-container" class="space-y-2.5"></div>
       </section>
 
       <!-- ============================================================ -->
@@ -439,12 +467,14 @@ def get_web_ui_html() -> HTMLResponse:
 
       document.getElementById('tab-shows').classList.toggle('hidden', tab !== 'shows');
       document.getElementById('tab-calendar').classList.toggle('hidden', tab !== 'calendar');
+      document.getElementById('tab-history').classList.toggle('hidden', tab !== 'history');
       document.getElementById('tab-feeds').classList.toggle('hidden', tab !== 'feeds');
       document.getElementById('tab-settings').classList.toggle('hidden', tab !== 'settings');
       document.getElementById('tab-logs').classList.toggle('hidden', tab !== 'logs');
 
       if (tab === 'shows') loadShows();
       if (tab === 'calendar') { loadShows(); renderCalendar(); }
+      if (tab === 'history') loadHistory();
       if (tab === 'feeds') loadFeeds();
       if (tab === 'settings') loadSettings();
       if (tab === 'logs') loadLogs();
@@ -1533,11 +1563,108 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
+    let cachedHistory = [];
+
+
+    function formatRelativeTime(isoStr) {
+      if (!isoStr) return '';
+      const now = Date.now();
+      const t = new Date(isoStr).getTime();
+      const diffSec = Math.max(0, Math.floor((now - t) / 1000));
+
+      if (diffSec < 60) return 'just now';
+      const diffMin = Math.floor(diffSec / 60);
+      if (diffMin < 60) return `${diffMin}m ago`;
+      const diffHours = Math.floor(diffMin / 60);
+      if (diffHours < 24) return `${diffHours}h ago`;
+      const diffDays = Math.floor(diffHours / 24);
+      return `${diffDays}d ago`;
+    }
+
+    async function loadHistory(manual = false) {
+      try {
+        const res = await fetch('/api/history?limit=100');
+        cachedHistory = await res.json();
+        renderHistory();
+        if (manual) showToast('History refreshed.', 'info');
+      } catch (err) {
+        if (manual) showToast(`Failed to load history: ${err}`, 'error');
+      }
+    }
+
+    function renderHistory() {
+      const container = document.getElementById('history-container');
+      const badge = document.getElementById('badge-total-history');
+      if (!container) return;
+
+      if (badge) badge.textContent = `${cachedHistory.length}`;
+
+      if (!cachedHistory || cachedHistory.length === 0) {
+        container.innerHTML = `
+          <div class="bg-[#18181c] border border-[#26262e] rounded-2xl p-8 text-center space-y-2">
+            <div class="text-zinc-400 font-medium text-sm">No matches recorded yet</div>
+            <p class="text-xs text-zinc-500 max-w-sm mx-auto">When an RSS rule matches a release in qBittorrent, it will appear here as confirmation that it began downloading.</p>
+          </div>
+        `;
+        return;
+      }
+
+      const rows = cachedHistory.map(h => {
+        const relTime = formatRelativeTime(h.created_at);
+        const fullTime = h.created_at ? new Date(h.created_at).toLocaleString() : '';
+        const regexVal = h.matched_regex || '';
+
+        const ruleBadge = regexVal ? `
+          <span class="relative group/regex inline-block">
+            <span class="font-mono font-medium text-zinc-100 bg-[#22222a] px-1.5 py-0.5 rounded-md border border-[#2f2f3b] cursor-help hover:border-emerald-500/50 hover:text-white transition-colors">
+              ${escapeHtml(h.rule_name || '')}
+            </span>
+            <span class="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover/regex:flex flex-col items-center z-50">
+              <span class="bg-[#121216] text-emerald-300 border border-[#30303c] text-xs font-mono font-medium px-2.5 py-1 rounded-lg shadow-2xl whitespace-nowrap max-w-sm sm:max-w-md truncate">
+                ${escapeHtml(regexVal)}
+              </span>
+              <span class="w-2 h-2 bg-[#121216] border-r border-b border-[#30303c] rotate-45 -mt-1"></span>
+            </span>
+          </span>
+        ` : `
+          <span class="font-mono font-medium text-zinc-100 bg-[#22222a] px-1.5 py-0.5 rounded-md border border-[#2f2f3b]">
+            ${escapeHtml(h.rule_name || '')}
+          </span>
+        `;
+
+        return `
+          <div class="bg-[#18181c] border border-[#26262e] hover:border-[#383844] rounded-2xl p-3.5 sm:px-4 sm:py-3 flex items-start sm:items-center justify-between gap-3 transition-colors shadow-sm">
+            <div class="flex items-start sm:items-center gap-3 min-w-0">
+              <span class="text-emerald-400 font-bold text-sm select-none shrink-0 mt-0.5 sm:mt-0">✓</span>
+              <div class="text-xs sm:text-sm text-zinc-300 leading-snug break-all sm:break-normal">
+                Rule ${ruleBadge} matched <span class="font-mono text-emerald-300 font-medium select-all">${escapeHtml(h.release_title || '')}</span>
+              </div>
+            </div>
+            <span class="text-xs text-zinc-500 font-mono flex-shrink-0 whitespace-nowrap self-start sm:self-center" title="${escapeHtml(fullTime)}">${relTime}</span>
+          </div>
+        `;
+      });
+
+      container.innerHTML = rows.join('');
+    }
+
+    async function clearHistory() {
+      if (!confirm('Clear all match history?')) return;
+      try {
+        await fetch('/api/history', { method: 'DELETE' });
+        showToast('Match history cleared.', 'success');
+        loadHistory();
+      } catch (err) {
+        showToast(`Failed to clear history: ${err}`, 'error');
+      }
+    }
+
     // -------------------------------------------------------------
     // Logs Tab Logic
     // -------------------------------------------------------------
     let logsAutoRefreshInterval = null;
     let cachedLogs = [];
+
 
     async function loadLogs(manual = false) {
       try {
@@ -1668,10 +1795,13 @@ def get_web_ui_html() -> HTMLResponse:
         document.getElementById('stat-working').textContent = `${st.counts.works} Working`;
         document.getElementById('stat-upcoming').textContent = `${st.counts.upcoming} Upcoming`;
         document.getElementById('stat-stalled').textContent = `${st.counts.stalled} Stalled`;
+
+        if (activeTab === 'history') loadHistory();
       } catch (err) {}
     }
 
     loadShows();
+    loadHistory();
     updateStatus();
     setInterval(updateStatus, 15000);
     setInterval(tickCountdown, 30000);

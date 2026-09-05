@@ -289,5 +289,21 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     assert updated_show.last_confirmed_episode == 22
     assert updated_show.matched_release_group == "SubsPlease"
 
+    # Also verify that MatchHistory was created for this auto-confirmed match
+    hist_res = client.get("/api/history")
+    assert hist_res.status_code == 200
+    hist_data = hist_res.json()
+    assert len(hist_data) == 1
+    assert hist_data[0]["show_name"] == "Yomi no Tsugai"
+    assert hist_data[0]["episode"] == 22
+    assert "Yomi no Tsugai - 22" in hist_data[0]["release_title"]
+
+    # Test clear history
+    del_res = client.delete("/api/history")
+    assert del_res.status_code == 200
+    hist_after = client.get("/api/history").json()
+    assert len(hist_after) == 0
+
+
 
 

@@ -5,7 +5,7 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 from qbit_seasonal_anime.config import DB_PATH, CONFIG_DIR
-from qbit_seasonal_anime.db.models import Settings, Feed, Monitored, RuleHistory
+from qbit_seasonal_anime.db.models import Settings, Feed, Monitored, RuleHistory, MatchHistory
 
 _engine = None
 
@@ -53,7 +53,11 @@ def init_db(engine=None):
     if engine is None:
         engine = get_engine()
     SQLModel.metadata.create_all(engine)
+    def get_table_columns(session: Session, table: str) -> set:
+        return {r[1] for r in session.exec(text(f"PRAGMA table_info({table})")).all()}
+
     with Session(engine) as session:
+        monitored_cols = get_table_columns(session, "monitored")
         for col_name, col_type in [
             ("matched_title", "VARCHAR"),
             ("matched_release_group", "VARCHAR"),
@@ -66,17 +70,19 @@ def init_db(engine=None):
             ("custom_regex", "VARCHAR"),
             ("custom_must_not", "VARCHAR"),
         ]:
-            try:
+            if col_name not in monitored_cols:
                 session.exec(text(f"ALTER TABLE monitored ADD COLUMN {col_name} {col_type}"))
                 session.commit()
-            except Exception:
-                session.rollback()
 
-        try:
+        settings_cols = get_table_columns(session, "settings")
+        if "title_language" not in settings_cols:
             session.exec(text("ALTER TABLE settings ADD COLUMN title_language VARCHAR DEFAULT 'english'"))
             session.commit()
-        except Exception:
-            session.rollback()
+
+        history_cols = get_table_columns(session, "match_history")
+        if "matched_regex" not in history_cols:
+            session.exec(text("ALTER TABLE match_history ADD COLUMN matched_regex VARCHAR"))
+            session.commit()
 
         # Seed default settings if empty
         stmt = select(Settings)

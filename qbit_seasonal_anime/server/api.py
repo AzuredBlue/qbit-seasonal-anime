@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings
-from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, Settings, MonitoredStatus, RuleOutcome, utc_now
+from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, Settings, MonitoredStatus, RuleOutcome, MatchHistory, utc_now
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
@@ -213,21 +213,26 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning fetching rule details from qBit: {e}", "WARNING")
 
+    feed_items: List[Dict[str, Any]] = []
+    if feed:
+        try:
+            from qbit_seasonal_anime.core.discovery import flatten_rss_articles
+            rss_tree = qbit.get_rss_items(with_data=True)
+            all_cached = flatten_rss_articles(rss_tree)
+            feed_items = all_cached.get(feed.qbit_feed_url, [])
+        except Exception as e:
+            state.add_log(f"Warning fetching cached feed articles: {e}", "DEBUG")
+
     # If qBittorrent in-memory matchingArticles API returned empty, evaluate regex against cached feed articles
-    if not matched_articles and feed:
+    if not matched_articles and feed_items:
         try:
             from qbit_seasonal_anime.core.rules import build_regex_pattern
             import re
-            from qbit_seasonal_anime.core.discovery import flatten_rss_articles
 
             must_pattern = qbit_rule_data.get("mustContain") or build_regex_pattern(show)
             must_not_pattern = qbit_rule_data.get("mustNotContain")
 
             if must_pattern:
-                rss_tree = qbit.get_rss_items(with_data=True)
-                all_cached = flatten_rss_articles(rss_tree)
-                feed_items = all_cached.get(feed.qbit_feed_url, [])
-                
                 must_re = re.compile(must_pattern)
                 must_not_re = re.compile(must_not_pattern) if must_not_pattern else None
 
@@ -243,9 +248,11 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
     # If show was UNCONFIRMED but matching articles exist, auto-confirm to Working immediately
     if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
         from qbit_seasonal_anime.core.matching import match_release_to_show
+        from qbit_seasonal_anime.core.discovery import parse_article_date
         best_ep = None
         best_title = None
         best_parsed = None
+        best_item = None
         for title in matched_articles:
             is_match, score, parsed = match_release_to_show(title, show.aliases)
             if is_match:
@@ -255,6 +262,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                         best_ep = ep
                         best_title = title
                         best_parsed = parsed
+                        best_item = next((it for it in feed_items if isinstance(it, dict) and it.get("title") == title), None)
 
         if best_ep is not None and best_parsed:
             show.last_confirmed_episode = max(show.last_confirmed_episode or 0, best_ep)
@@ -287,9 +295,36 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             except Exception as e:
                 state.add_log(f"Warning tightening rule in qBittorrent: {e}", "WARNING")
 
+            match_time = None
+            if best_item:
+                art_dt = parse_article_date(best_item)
+                if art_dt and art_dt.year > 2000:
+                    match_time = art_dt
+
+            from qbit_seasonal_anime.core.rules import build_regex_pattern
+            regex_pat = qbit_rule_data.get("mustContain") or show.custom_regex or build_regex_pattern(
+                show.aliases,
+                matched_title=show.matched_title,
+                release_group=show.matched_release_group,
+            )
+
+            from qbit_seasonal_anime.core.confirmation import record_match_event
+            record_match_event(
+                session=session,
+                monitored_id=show.id,
+                show_name=show.display_name,
+                rule_name=show.qbit_rule_name or f"[Seasonal] {show.display_name}",
+                release_title=best_title,
+                feed_name=feed.qbit_feed_name if feed else None,
+                episode=best_ep,
+                match_time=match_time,
+                matched_regex=regex_pat,
+            )
+
             session.add(show)
             session.commit()
             state.add_log(f"Auto-confirmed rule for '{show.display_name}' (Ep {best_ep}) via '{best_title}' -> Works", "INFO")
+
 
     prefer_english = (getattr(settings, "title_language", "english") == "english")
     effective_display_name = show.title_english if (prefer_english and show.title_english) else (show.title_romaji or show.display_name)
@@ -781,3 +816,50 @@ def get_system_status(session: Session = Depends(get_db)):
 def get_recent_logs(limit: int = 100):
     all_logs = list(state.logs)
     return all_logs[-limit:]
+
+
+@router.get("/history")
+def get_match_history(limit: int = 100, session: Session = Depends(get_db)):
+    stmt = select(MatchHistory).order_by(MatchHistory.created_at.desc()).limit(limit)
+    items = session.exec(stmt).all()
+    from qbit_seasonal_anime.core.rules import build_regex_pattern
+
+    shows_map = {s.id: s for s in session.exec(select(Monitored)).all()}
+    res = []
+    for item in items:
+        created_str = None
+        if item.created_at:
+            dt = item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=timezone.utc)
+            created_str = dt.isoformat()
+
+        matched_reg = item.matched_regex
+        if not matched_reg and item.monitored_id and item.monitored_id in shows_map:
+            s_obj = shows_map[item.monitored_id]
+            matched_reg = s_obj.custom_regex or build_regex_pattern(
+                s_obj.aliases,
+                matched_title=s_obj.matched_title,
+                release_group=s_obj.matched_release_group,
+            )
+
+        res.append({
+            "id": item.id,
+            "monitored_id": item.monitored_id,
+            "show_name": item.show_name,
+            "rule_name": item.rule_name,
+            "feed_name": item.feed_name,
+            "release_title": item.release_title,
+            "episode": item.episode,
+            "created_at": created_str,
+            "matched_regex": matched_reg,
+        })
+    return res
+
+
+@router.delete("/history")
+def clear_match_history(session: Session = Depends(get_db)):
+    items = session.exec(select(MatchHistory)).all()
+    for item in items:
+        session.delete(item)
+    session.commit()
+    return {"status": "success", "message": "Match history cleared"}
+
