@@ -245,14 +245,11 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning matching against cached articles: {e}", "DEBUG")
 
-    # If show was UNCONFIRMED but matching articles exist, auto-confirm to Working immediately
     if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
         from qbit_seasonal_anime.core.matching import match_release_to_show
-        from qbit_seasonal_anime.core.discovery import parse_article_date
         best_ep = None
         best_title = None
         best_parsed = None
-        best_item = None
         for title in matched_articles:
             is_match, score, parsed = match_release_to_show(title, show.aliases)
             if is_match:
@@ -262,7 +259,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                         best_ep = ep
                         best_title = title
                         best_parsed = parsed
-                        best_item = next((it for it in feed_items if isinstance(it, dict) and it.get("title") == title), None)
 
         if best_ep is not None and best_parsed:
             show.last_confirmed_episode = max(show.last_confirmed_episode or 0, best_ep)
@@ -295,12 +291,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             except Exception as e:
                 state.add_log(f"Warning tightening rule in qBittorrent: {e}", "WARNING")
 
-            match_time = None
-            if best_item:
-                art_dt = parse_article_date(best_item)
-                if art_dt and art_dt.year > 2000:
-                    match_time = art_dt
-
             from qbit_seasonal_anime.core.rules import build_regex_pattern
             regex_pat = qbit_rule_data.get("mustContain") or show.custom_regex or build_regex_pattern(
                 show.aliases,
@@ -317,7 +307,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                 release_title=best_title,
                 feed_name=feed.qbit_feed_name if feed else None,
                 episode=best_ep,
-                match_time=match_time,
+                match_time=utc_now(),
                 matched_regex=regex_pat,
             )
 

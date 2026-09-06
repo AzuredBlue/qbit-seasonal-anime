@@ -4,7 +4,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.matching import match_release_to_show
-from qbit_seasonal_anime.core.discovery import flatten_rss_articles, parse_article_date
+from qbit_seasonal_anime.core.discovery import flatten_rss_articles
 from qbit_seasonal_anime.core.rules import create_or_update_rule, build_regex_pattern
 from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, Feed, MatchHistory, utc_now
 
@@ -103,7 +103,6 @@ def verify_and_confirm_rules_from_feeds(
         best_ep = None
         matched_title = None
         best_parsed = None
-        best_art = None
 
         for a in articles:
             title = a.get("title", "")
@@ -115,7 +114,6 @@ def verify_and_confirm_rules_from_feeds(
                         best_ep = ep
                         matched_title = title
                         best_parsed = parsed
-                        best_art = a
 
         if best_ep is not None:
             current_last = show.last_confirmed_episode or 0
@@ -166,11 +164,6 @@ def verify_and_confirm_rules_from_feeds(
                 logs.append(msg)
 
             if matched_title:
-                match_time = None
-                if best_art:
-                    art_dt = parse_article_date(best_art)
-                    if art_dt and art_dt.year > 2000:
-                        match_time = art_dt
                 regex_pat = show.custom_regex or build_regex_pattern(
                     show.aliases,
                     matched_title=show.matched_title,
@@ -184,7 +177,7 @@ def verify_and_confirm_rules_from_feeds(
                     release_title=matched_title,
                     feed_name=feed.qbit_feed_name if feed else None,
                     episode=best_ep,
-                    match_time=match_time,
+                    match_time=utc_now(),
                     matched_regex=regex_pat,
                 )
 

@@ -47,7 +47,11 @@ class TestConfirmation(unittest.TestCase):
             "SubsPlease": {
                 "url": "https://subsplease.org/rss/?r=1080",
                 "articles": [
-                    {"title": "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv", "torrentURL": "https://subs/8.torrent"}
+                    {
+                        "title": "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv",
+                        "torrentURL": "https://subs/8.torrent",
+                        "date": "03 Sep 2026 12:00:00 +0000",
+                    }
                 ]
             }
         }
@@ -61,6 +65,16 @@ class TestConfirmation(unittest.TestCase):
         self.assertEqual(self.show.last_confirmed_episode, 8)
         self.assertEqual(self.hist.outcome, RuleOutcome.CONFIRMED)
         self.assertTrue(any("Confirmed rule" in log for log in logs))
+
+        # MatchHistory should record the time it matched (received), NOT the 3-day-old article date
+        from qbit_seasonal_anime.db.models import MatchHistory, utc_now
+        from sqlmodel import select
+        m_hist = self.session.exec(select(MatchHistory)).all()
+        self.assertEqual(len(m_hist), 1)
+        self.assertEqual(m_hist[0].release_title, "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv")
+        # Time difference from utc_now should be within seconds, not 3 days
+        diff_sec = abs((utc_now().replace(tzinfo=None) - m_hist[0].created_at).total_seconds())
+        self.assertLess(diff_sec, 10)
 
     def test_confirmation_no_matching_article_remains_unconfirmed(self):
         mock_qbit = MagicMock()

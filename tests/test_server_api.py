@@ -276,6 +276,16 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     mock_qbit.get_matching_articles.return_value = {
         "https://subsplease.org/rss": ["[SubsPlease] Yomi no Tsugai - 22 (1080p) [3B57467D].mkv"]
     }
+    mock_qbit.get_rss_items.return_value = {
+        "https://subsplease.org/rss": {
+            "articles": [
+                {
+                    "title": "[SubsPlease] Yomi no Tsugai - 22 (1080p) [3B57467D].mkv",
+                    "date": "01 Sep 2026 12:00:00 +0000",
+                }
+            ]
+        }
+    }
 
     res = client.get(f"/api/shows/{show.id}/rule")
     assert res.status_code == 200
@@ -289,7 +299,7 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     assert updated_show.last_confirmed_episode == 22
     assert updated_show.matched_release_group == "SubsPlease"
 
-    # Also verify that MatchHistory was created for this auto-confirmed match
+    # Also verify that MatchHistory was created for this auto-confirmed match with reception timestamp
     hist_res = client.get("/api/history")
     assert hist_res.status_code == 200
     hist_data = hist_res.json()
@@ -297,6 +307,11 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     assert hist_data[0]["show_name"] == "Yomi no Tsugai"
     assert hist_data[0]["episode"] == 22
     assert "Yomi no Tsugai - 22" in hist_data[0]["release_title"]
+
+    from datetime import datetime, timezone
+    created_dt = datetime.fromisoformat(hist_data[0]["created_at"])
+    now_dt = datetime.now(timezone.utc)
+    assert abs((now_dt - created_dt).total_seconds()) < 10
 
     # Test clear history
     del_res = client.delete("/api/history")
