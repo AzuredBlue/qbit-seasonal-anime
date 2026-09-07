@@ -42,7 +42,11 @@ class TestConfirmation(unittest.TestCase):
         self.session.close()
 
     def test_confirmation_true_positive(self):
+        from qbit_seasonal_anime.db.models import MatchHistory, utc_now
+        from sqlmodel import select
         mock_qbit = MagicMock()
+        mock_received_time = utc_now()
+        mock_qbit.get_rule_match_time.return_value = mock_received_time
         mock_qbit.get_rss_items.return_value = {
             "SubsPlease": {
                 "url": "https://subsplease.org/rss/?r=1080",

@@ -4,7 +4,7 @@ from typing import List, Optional
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.matching import match_release_to_show
-from qbit_seasonal_anime.core.discovery import flatten_rss_articles
+from qbit_seasonal_anime.core.discovery import flatten_rss_articles, parse_article_date
 from qbit_seasonal_anime.core.rules import create_or_update_rule, build_regex_pattern
 from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, Feed, MatchHistory, utc_now
 
@@ -24,22 +24,29 @@ def record_match_event(
 ) -> Optional[MatchHistory]:
     """Record a matched release in match_history if not already recorded."""
     try:
+        if isinstance(match_time, datetime):
+            if match_time.tzinfo:
+                stored_time = match_time.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                stored_time = match_time
+        else:
+            stored_time = utc_now().replace(tzinfo=None)
+
         existing = session.exec(
             select(MatchHistory).where(MatchHistory.release_title == release_title)
         ).first()
         if existing:
+            updated_existing = False
             if matched_regex and not existing.matched_regex:
                 existing.matched_regex = matched_regex
+                updated_existing = True
+            if stored_time and existing.created_at != stored_time:
+                existing.created_at = stored_time
+                updated_existing = True
+            if updated_existing:
                 session.add(existing)
                 session.commit()
             return existing
-
-        if match_time and match_time.tzinfo:
-            stored_time = match_time.astimezone(timezone.utc).replace(tzinfo=None)
-        elif match_time:
-            stored_time = match_time
-        else:
-            stored_time = utc_now().replace(tzinfo=None)
 
         record = MatchHistory(
             monitored_id=monitored_id,
@@ -103,6 +110,7 @@ def verify_and_confirm_rules_from_feeds(
         best_ep = None
         matched_title = None
         best_parsed = None
+        best_art = None
 
         for a in articles:
             title = a.get("title", "")
@@ -114,6 +122,7 @@ def verify_and_confirm_rules_from_feeds(
                         best_ep = ep
                         matched_title = title
                         best_parsed = parsed
+                        best_art = a
 
         if best_ep is not None:
             current_last = show.last_confirmed_episode or 0
@@ -164,6 +173,27 @@ def verify_and_confirm_rules_from_feeds(
                 logs.append(msg)
 
             if matched_title:
+                rule_name = show.qbit_rule_name or f"[Seasonal] {show.display_name}"
+                match_time = None
+                try:
+                    match_time = qbit_client.get_rule_match_time(
+                        rule_name=rule_name,
+                        release_title=matched_title,
+                    )
+                except Exception:
+                    pass
+
+                if not isinstance(match_time, datetime):
+                    match_time = None
+
+                if not match_time and best_art:
+                    art_dt = parse_article_date(best_art)
+                    if art_dt and art_dt.year > 2000:
+                        match_time = art_dt
+
+                if not match_time:
+                    match_time = utc_now()
+
                 regex_pat = show.custom_regex or build_regex_pattern(
                     show.aliases,
                     matched_title=show.matched_title,
@@ -173,11 +203,11 @@ def verify_and_confirm_rules_from_feeds(
                     session=session,
                     monitored_id=show.id,
                     show_name=show.display_name,
-                    rule_name=show.qbit_rule_name or f"[Seasonal] {show.display_name}",
+                    rule_name=rule_name,
                     release_title=matched_title,
                     feed_name=feed.qbit_feed_name if feed else None,
                     episode=best_ep,
-                    match_time=utc_now(),
+                    match_time=match_time,
                     matched_regex=regex_pat,
                 )
 

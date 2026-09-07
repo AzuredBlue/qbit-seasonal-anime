@@ -291,6 +291,30 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             except Exception as e:
                 state.add_log(f"Warning tightening rule in qBittorrent: {e}", "WARNING")
 
+            rule_name = show.qbit_rule_name or f"[Seasonal] {show.display_name}"
+            match_time = None
+            try:
+                match_time = qbit.get_rule_match_time(
+                    rule_name=rule_name,
+                    release_title=best_title,
+                )
+            except Exception:
+                pass
+
+            if not isinstance(match_time, datetime):
+                match_time = None
+
+            if not match_time and feed_items:
+                best_item = next((it for it in feed_items if isinstance(it, dict) and it.get("title") == best_title), None)
+                if best_item:
+                    from qbit_seasonal_anime.core.discovery import parse_article_date
+                    art_dt = parse_article_date(best_item)
+                    if art_dt and art_dt.year > 2000:
+                        match_time = art_dt
+
+            if not match_time:
+                match_time = utc_now()
+
             from qbit_seasonal_anime.core.rules import build_regex_pattern
             regex_pat = qbit_rule_data.get("mustContain") or show.custom_regex or build_regex_pattern(
                 show.aliases,
@@ -303,11 +327,11 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                 session=session,
                 monitored_id=show.id,
                 show_name=show.display_name,
-                rule_name=show.qbit_rule_name or f"[Seasonal] {show.display_name}",
+                rule_name=rule_name,
                 release_title=best_title,
                 feed_name=feed.qbit_feed_name if feed else None,
                 episode=best_ep,
-                match_time=utc_now(),
+                match_time=match_time,
                 matched_regex=regex_pat,
             )
 

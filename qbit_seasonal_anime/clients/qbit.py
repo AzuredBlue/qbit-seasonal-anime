@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -169,4 +171,32 @@ class QBitClient:
             logger.debug("Triggered immediate RSS feeds refresh in qBittorrent.")
         except Exception as e:
             logger.debug(f"Could not trigger RSS refresh in qBittorrent: {e}")
+
+    def get_rule_match_time(self, rule_name: str, release_title: str) -> Optional[datetime]:
+        """
+        Find the exact time when qBittorrent accepted/matched this release for this rule.
+        1. Searches qBittorrent client application log for:
+           'RSS article <release_title> is accepted by rule <rule_name>'
+        2. If not in log (e.g. rolled over or client restarted), checks rule's lastMatch in qBittorrent.
+        """
+        try:
+            client = self.get_client()
+            logs = client.log_main(last_known_id=-1)
+            for entry in reversed(logs):
+                msg = entry.message
+                if "is accepted by rule" in msg and release_title in msg:
+                    return datetime.fromtimestamp(entry.timestamp, tz=timezone.utc)
+        except Exception as e:
+            logger.debug(f"Could not search qBittorrent log for match event: {e}")
+
+        try:
+            rules = self.get_rss_rules()
+            rule_def = rules.get(rule_name)
+            if rule_def and rule_def.get("lastMatch"):
+                dt = parsedate_to_datetime(rule_def["lastMatch"])
+                return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception as e:
+            logger.debug(f"Could not read rule lastMatch: {e}")
+
+        return None
 
