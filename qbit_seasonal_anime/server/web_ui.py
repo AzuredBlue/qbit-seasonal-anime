@@ -570,12 +570,21 @@ def get_web_ui_html() -> HTMLResponse:
     function sortShowsList(list) {
       const copy = [...list];
       if (currentSortMode === 'airing') {
+        const now = Date.now();
         copy.sort((a, b) => {
           const aTime = a.next_airing_at ? new Date(a.next_airing_at).getTime() : Infinity;
           const bTime = b.next_airing_at ? new Date(b.next_airing_at).getTime() : Infinity;
-          if (aTime !== bTime) {
-            return aTime - bTime; // Soonest air date first
-          }
+
+          const aUpcoming = aTime > now && aTime !== Infinity;
+          const bUpcoming = bTime > now && bTime !== Infinity;
+
+          // 1. Upcoming shows first (soonest air date first)
+          if (aUpcoming && !bUpcoming) return -1;
+          if (!aUpcoming && bUpcoming) return 1;
+
+          // 2. Both upcoming, or both non-upcoming (Aired finite timestamps sort before Infinity)
+          if (aTime !== bTime) return aTime - bTime;
+
           return (a.display_name || '').localeCompare(b.display_name || '');
         });
       } else if (currentSortMode === 'title') {
@@ -652,12 +661,16 @@ def get_web_ui_html() -> HTMLResponse:
 
       let airInfo = '-';
       let countdownAttr = '';
-      if (show.next_airing_episode && show.next_airing_at) {
-        const cd = formatEpisodeCountdown(show.next_airing_at);
-        airInfo = `Ep ${show.next_airing_episode} (${cd || show.next_airing_formatted || ''})`;
-        countdownAttr = `data-air-at="${show.next_airing_at}" data-ep="${show.next_airing_episode}" data-date-str="${show.next_airing_formatted || ''}"`;
-      } else if (statusKey === 'COMPLETED') {
+      if (statusKey === 'COMPLETED') {
         airInfo = 'Completed';
+      } else if (show.next_airing_episode && show.next_airing_at) {
+        const cd = formatEpisodeCountdown(show.next_airing_at);
+        if (cd === 'Aired' && show.last_confirmed_episode && show.last_confirmed_episode >= show.next_airing_episode) {
+          airInfo = `Ep ${show.last_confirmed_episode} (Downloaded)`;
+        } else {
+          airInfo = `Ep ${show.next_airing_episode} (${cd || show.next_airing_formatted || ''})`;
+          countdownAttr = `data-air-at="${show.next_airing_at}" data-ep="${show.next_airing_episode}" data-date-str="${show.next_airing_formatted || ''}"`;
+        }
       } else if (show.last_confirmed_episode) {
         airInfo = `Ep ${show.last_confirmed_episode}`;
       } else if (statusKey === 'STALLED') {

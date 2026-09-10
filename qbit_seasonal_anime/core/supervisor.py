@@ -1,12 +1,12 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
 from qbit_seasonal_anime.core.discovery import discover_feed_for_show, flatten_rss_articles
-from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule
+from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule
 from qbit_seasonal_anime.core.stall import check_and_handle_stalls
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
@@ -397,6 +397,58 @@ class Supervisor:
             logs.append(f"Synchronized {refreshed} updated rules in qBittorrent.")
         return logs
 
+    def reconcile_schedule_rollover(self) -> List[str]:
+        """
+        Auto-roll episode schedules (+7 days weekly heuristic) when AniList API is unreachable,
+        rate-limited, or lagging behind TV broadcast.
+        """
+        logs = []
+        now = utc_now()
+        active_stmt = select(Monitored).where(
+            Monitored.status.in_([MonitoredStatus.UNCONFIRMED, MonitoredStatus.FIXED, MonitoredStatus.STALLED])
+        )
+        shows = self.session.exec(active_stmt).all()
+
+        for show in shows:
+            air_at = show.next_airing_at
+            if not air_at:
+                continue
+            if air_at.tzinfo is None:
+                air_at = air_at.replace(tzinfo=timezone.utc)
+
+            # Only evaluate shows whose scheduled air time has already passed
+            if air_at > now:
+                continue
+
+            current_ep = show.next_airing_episode or 1
+
+            # Determine if rollover should trigger:
+            # 1. Show has a confirmed release (last_confirmed_episode is set), OR
+            # 2. Episode aired >24 hours ago without AniList updating
+            has_confirmed_release = bool(show.last_confirmed_episode and show.last_confirmed_episode > 0)
+            is_overdue_24h = air_at <= (now - timedelta(hours=24))
+
+            if has_confirmed_release or is_overdue_24h:
+                new_ep = current_ep + 1
+                new_air = air_at + timedelta(days=7)
+                while new_air <= now:
+                    new_air += timedelta(days=7)
+                    new_ep += 1
+
+                show.next_airing_episode = new_ep
+                show.next_airing_at = new_air
+                self.session.add(show)
+
+                air_str = new_air.strftime("%d/%m %H:%M UTC")
+                msg = f"Show '{show.display_name}': Rolled schedule to Ep {new_ep} ({air_str})."
+                logger.info(msg)
+                logs.append(msg)
+
+        if logs:
+            self.session.commit()
+
+        return logs
+
     async def run_full_cycle(self) -> List[str]:
         """Execute one complete supervision iteration."""
         all_logs: List[str] = []
@@ -413,10 +465,13 @@ class Supervisor:
         # 4. Confirmation loop for active downloads and RSS releases
         all_logs.extend(verify_and_confirm_torrents(self.session, self.qbit, self.settings))
 
-        # 5. Refresh & synchronize active rules in qBittorrent
+        # 5. Reconcile schedule rollover (+7d weekly heuristic)
+        all_logs.extend(self.reconcile_schedule_rollover())
+
+        # 6. Refresh & synchronize active rules in qBittorrent
         all_logs.extend(self.sync_active_rules())
 
-        # 6. Check for stalled releases & trigger fallback
+        # 7. Check for stalled releases & trigger fallback
         all_logs.extend(check_and_handle_stalls(self.session, self.qbit, self.settings))
 
         # 7. Summary breakdown

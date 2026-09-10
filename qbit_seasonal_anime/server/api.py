@@ -681,6 +681,9 @@ async def sync_anilist_now(session: Session = Depends(get_db)):
         from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
         confirm_logs = verify_and_confirm_torrents(session, qbit, s)
         logs.extend(confirm_logs)
+        # 5. Reconcile schedule rollover (+7d weekly heuristic)
+        rollover_logs = sup.reconcile_schedule_rollover()
+        logs.extend(rollover_logs)
 
         for l in logs:
             state.add_log(l, "INFO")
