@@ -21,7 +21,7 @@ class QBitClient:
         self.timeout = timeout
         self._client: Optional[qbittorrentapi.Client] = None
 
-    def get_client(self, max_retries: int = 5, backoff_factor: float = 2.0) -> qbittorrentapi.Client:
+    def get_client(self, max_retries: int = 2, backoff_factor: float = 0.5) -> qbittorrentapi.Client:
         if self._client is not None:
             return self._client
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
@@ -568,28 +569,28 @@ class Supervisor:
         all_logs: List[str] = []
 
         # 1. Sync RSS feeds from qBittorrent
-        all_logs.extend(self.sync_feeds())
+        all_logs.extend(await asyncio.to_thread(self.sync_feeds))
 
         # 2. Sync schedule and discover newly added seasonal anime from AniList FIRST
         all_logs.extend(await self.sync_anilist_schedule())
 
         # 3. Prune finished shows from past seasons (extending cours are preserved)
-        all_logs.extend(self.prune_past_season_shows())
+        all_logs.extend(await asyncio.to_thread(self.prune_past_season_shows))
 
         # 4. Bootstrap any new/unassigned shows
-        all_logs.extend(self.bootstrap_unassigned_shows())
+        all_logs.extend(await asyncio.to_thread(self.bootstrap_unassigned_shows))
 
         # 5. Confirmation loop for active downloads and RSS releases
-        all_logs.extend(verify_and_confirm_torrents(self.session, self.qbit, self.settings))
+        all_logs.extend(await asyncio.to_thread(verify_and_confirm_torrents, self.session, self.qbit, self.settings))
 
         # 6. Reconcile schedule rollover (+7d weekly heuristic)
-        all_logs.extend(self.reconcile_schedule_rollover())
+        all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
 
         # 7. Refresh & synchronize active rules in qBittorrent
-        all_logs.extend(self.sync_active_rules())
+        all_logs.extend(await asyncio.to_thread(self.sync_active_rules))
 
         # 8. Check for stalled releases & trigger fallback / finished show completion
-        all_logs.extend(check_and_handle_stalls(self.session, self.qbit, self.settings))
+        all_logs.extend(await asyncio.to_thread(check_and_handle_stalls, self.session, self.qbit, self.settings))
 
         # 7. Summary breakdown
         total_shows = self.session.exec(select(Monitored)).all()

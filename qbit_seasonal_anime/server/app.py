@@ -50,7 +50,8 @@ async def background_supervisor_task():
                     state.is_running_cycle = False
 
                 default_interval = max(60, settings.refresh_interval_minutes * 60)
-                sleep_seconds, reason = calculate_next_poll_interval(
+                sleep_seconds, reason = await asyncio.to_thread(
+                    calculate_next_poll_interval,
                     session,
                     default_interval_seconds=default_interval,
                     qbit_client=qbit,
@@ -101,7 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
 
     @app.get("/", response_class=HTMLResponse)
-    def index():
+    async def index():
         return get_web_ui_html()
 
     return app
