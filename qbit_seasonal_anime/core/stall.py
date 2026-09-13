@@ -4,7 +4,8 @@ from typing import List
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.discovery import discover_feed_for_show
-from qbit_seasonal_anime.core.rules import create_or_update_rule, delete_rule
+from qbit_seasonal_anime.core.rules import create_or_update_rule, delete_rule, disable_rule
+from qbit_seasonal_anime.core.confirmation import has_downloaded_final_episode
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.stall")
@@ -32,15 +33,27 @@ def check_and_handle_stalls(
 
     for show in shows:
         # Finished show check
-        if show.next_airing_at is None and show.next_airing_episode is None:
-            if show.total_episodes and (show.last_confirmed_episode or 0) >= show.total_episodes:
+        is_finished_broadcast = (show.next_airing_at is None and show.next_airing_episode is None)
+        air_at = show.next_airing_at
+        if air_at and air_at.tzinfo is None:
+            from datetime import timezone
+            air_at = air_at.replace(tzinfo=timezone.utc)
+        has_aired_finale = (
+            show.total_episodes is not None
+            and (show.next_airing_episode or 0) >= show.total_episodes
+            and (air_at is None or air_at <= now)
+        )
+
+        if is_finished_broadcast or has_aired_finale:
+            if has_downloaded_final_episode(session, show):
                 if show.qbit_rule_name:
-                    delete_rule(qbit_client, show.qbit_rule_name)
-                    show.qbit_rule_name = None
+                    disable_rule(qbit_client, show.qbit_rule_name)
+                show.next_airing_at = None
+                show.next_airing_episode = None
                 show.status = MonitoredStatus.COMPLETED
                 session.add(show)
                 session.commit()
-                msg = f"Show '{show.display_name}' completed all {show.total_episodes} episodes. Status -> COMPLETED"
+                msg = f"Show '{show.display_name}' completed all {show.total_episodes} episodes. Status -> COMPLETED, rule disabled."
                 logger.info(msg)
                 logs.append(msg)
                 continue

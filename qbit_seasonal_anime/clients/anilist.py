@@ -1,8 +1,8 @@
 import asyncio
 from datetime import datetime, timezone
 import logging
-from typing import Any, Dict, List, Optional
-import httpx2 as httpx
+from typing import Any, Dict, List, Optional, Set
+import httpx2
 
 logger = logging.getLogger("qbit_seasonal_anime.clients.anilist")
 
@@ -120,7 +120,7 @@ class AniListClient:
     async def _post_query(self, query: str, variables: Dict[str, Any], max_retries: int = 3) -> Dict[str, Any]:
         """Execute GraphQL query with exponential backoff on rate limits (HTTP 429)."""
         backoff = 2.0
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx2.AsyncClient(timeout=self.timeout) as client:
             for attempt in range(max_retries):
                 try:
                     resp = await client.post(
@@ -144,12 +144,12 @@ class AniListClient:
                     if "errors" in data:
                         raise AniListError(f"AniList GraphQL error: {data['errors']}")
                     return data.get("data") or {}
-                except httpx.HTTPStatusError as e:
+                except httpx2.HTTPStatusError as e:
                     if attempt == max_retries - 1:
                         raise AniListError(f"AniList HTTP error: {e.response.status_code} - {e.response.text}") from e
                     await asyncio.sleep(backoff)
                     backoff *= 2
-                except httpx.RequestError as e:
+                except httpx2.RequestError as e:
                     if attempt == max_retries - 1:
                         raise AniListError(f"AniList network connection failed: {e}") from e
                     await asyncio.sleep(backoff)
@@ -157,11 +157,14 @@ class AniListClient:
 
         raise AniListError("Max retries exceeded querying AniList API")
 
-    async def fetch_user_seasonal_anime(self, username: str) -> List[Dict[str, Any]]:
+    async def fetch_user_seasonal_anime(
+        self, username: str, monitored_anilist_ids: Optional[Set[int]] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Fetch user's anime filtered strictly to:
+        Fetch user's anime filtered to:
         1. Currently releasing anime
         2. Upcoming anime planned for next season (or current season if not yet released)
+        3. Finished anime from the current season (or extending cour monitored shows)
         """
         if not username.strip():
             return []
@@ -188,16 +191,22 @@ class AniListClient:
                 season_year = media.get("seasonYear")
                 next_airing = media.get("nextAiringEpisode")
 
-                # Strictly filter:
+                # Filter criteria:
                 # 1. Currently releasing anime (status == RELEASING)
                 # 2. Upcoming show for next season (or unreleased in current season)
+                # 3. Finished show from the current season
+                # 4. Any show already monitored in the database (e.g. extending cour finishing)
                 is_currently_releasing = (status == "RELEASING")
                 is_current_or_next_season_planned = (
                     (season == next_season and season_year == next_year) or
                     (season == cur_season and season_year == cur_year and status == "NOT_YET_RELEASED")
                 )
+                is_current_season_finished = (
+                    season == cur_season and season_year == cur_year and status == "FINISHED"
+                )
+                is_monitored = bool(monitored_anilist_ids and media_id in monitored_anilist_ids)
 
-                if not (is_currently_releasing or is_current_or_next_season_planned):
+                if not (is_currently_releasing or is_current_or_next_season_planned or is_current_season_finished or is_monitored):
                     continue
 
                 # Build alias list

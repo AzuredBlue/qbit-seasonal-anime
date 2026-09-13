@@ -80,3 +80,68 @@ async def test_fetch_user_seasonal_anime_filtering():
         # strictly filtering out show 3 (finished) and show 4 (future season beyond next season)!
         assert len(shows) == 2
         assert {s["anilist_id"] for s in shows} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_fetch_user_seasonal_anime_includes_current_season_finished_and_monitored():
+    client = AniListClient()
+
+    payload = {
+        "MediaListCollection": {
+            "lists": [
+                {
+                    "name": "Watching",
+                    "entries": [
+                        {
+                            "media": {
+                                "id": 10,
+                                "title": {"romaji": "Summer Finished Show"},
+                                "status": "FINISHED",
+                                "season": "SUMMER",
+                                "seasonYear": 2026,
+                                "episodes": 12,
+                                "nextAiringEpisode": None,
+                            }
+                        },
+                        {
+                            "media": {
+                                "id": 20,
+                                "title": {"romaji": "Extending Cour from Spring now Finished"},
+                                "status": "FINISHED",
+                                "season": "SPRING",
+                                "seasonYear": 2026,
+                                "episodes": 24,
+                                "nextAiringEpisode": None,
+                            }
+                        },
+                        {
+                            "media": {
+                                "id": 30,
+                                "title": {"romaji": "Unmonitored Old Spring Backlog"},
+                                "status": "FINISHED",
+                                "season": "SPRING",
+                                "seasonYear": 2026,
+                                "episodes": 12,
+                                "nextAiringEpisode": None,
+                            }
+                        },
+                    ]
+                }
+            ]
+        }
+    }
+
+    with patch.object(client, "_post_query", new_callable=AsyncMock) as mock_post, \
+         patch("qbit_seasonal_anime.clients.anilist.get_current_and_next_season", return_value=(("SUMMER", 2026), ("FALL", 2026))):
+        mock_post.return_value = payload
+
+        # Monitored IDs has 20 (extending cour), but not 30
+        shows = await client.fetch_user_seasonal_anime("TestUser", monitored_anilist_ids={20})
+        # Should include:
+        # - Show 10: Current season finished (SUMMER 2026)
+        # - Show 20: Tracked monitored extending cour finished (SPRING 2026)
+        # Should exclude:
+        # - Show 30: Unmonitored old spring backlog
+        assert len(shows) == 2
+        assert {s["anilist_id"] for s in shows} == {10, 20}
+

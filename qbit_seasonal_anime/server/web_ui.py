@@ -451,7 +451,7 @@ def get_web_ui_html() -> HTMLResponse:
       'UNCONFIRMED': { label: 'Testing', bg: 'bg-[#713f12] text-[#facc15] border-[#a16207]' },
       'UPCOMING': { label: 'Upcoming', bg: 'bg-[#1e3a8a] text-[#60a5fa] border-[#2563eb]' },
       'STALLED': { label: 'Stalled', bg: 'bg-[#7f1d1d] text-[#f87171] border-[#dc2626]' },
-      'COMPLETED': { label: 'Completed', bg: 'bg-[#134e4a] text-[#2dd4bf] border-[#0d9488]' },
+      'COMPLETED': { label: 'Completed', bg: 'bg-[#064e3b] text-[#34d399] border-[#059669]' },
       'PAUSED': { label: 'Paused', bg: 'bg-[#27272a] text-[#a1a1aa] border-[#3f3f46]' },
     };
 
@@ -569,9 +569,18 @@ def get_web_ui_html() -> HTMLResponse:
 
     function sortShowsList(list) {
       const copy = [...list];
-      if (currentSortMode === 'airing') {
-        const now = Date.now();
-        copy.sort((a, b) => {
+      const isCompleted = s => ((s.status || '').toUpperCase() === 'COMPLETED');
+
+      copy.sort((a, b) => {
+        const aCompleted = isCompleted(a);
+        const bCompleted = isCompleted(b);
+
+        // Completed shows are always placed last in the ordering
+        if (aCompleted && !bCompleted) return 1;
+        if (!aCompleted && bCompleted) return -1;
+
+        if (currentSortMode === 'airing') {
+          const now = Date.now();
           const aTime = a.next_airing_at ? new Date(a.next_airing_at).getTime() : Infinity;
           const bTime = b.next_airing_at ? new Date(b.next_airing_at).getTime() : Infinity;
 
@@ -586,13 +595,13 @@ def get_web_ui_html() -> HTMLResponse:
           if (aTime !== bTime) return aTime - bTime;
 
           return (a.display_name || '').localeCompare(b.display_name || '');
-        });
-      } else if (currentSortMode === 'title') {
-        copy.sort((a, b) => (a.display_name || '').localeCompare(b.display_name || ''));
-      } else {
-        // default / id order
-        copy.sort((a, b) => (a.id || 0) - (b.id || 0));
-      }
+        } else if (currentSortMode === 'title') {
+          return (a.display_name || '').localeCompare(b.display_name || '');
+        } else {
+          // default / id order
+          return (a.id || 0) - (b.id || 0);
+        }
+      });
       return copy;
     }
 
@@ -641,6 +650,7 @@ def get_web_ui_html() -> HTMLResponse:
     function renderShowCard(show) {
       const rawStatus = (show.status || 'UNCONFIRMED').toUpperCase();
       const isPaused = rawStatus === 'PAUSED';
+      const isCompleted = rawStatus === 'COMPLETED';
       const statusKey = isPaused ? ((show.status_before_pause || 'UNCONFIRMED').toUpperCase()) : rawStatus;
 
       let cfg = STATUS_CONFIG[statusKey] || STATUS_CONFIG['UNCONFIRMED'];
@@ -679,21 +689,13 @@ def get_web_ui_html() -> HTMLResponse:
 
       const feedName = show.current_feed_name || '[None]';
 
-      // Subtle, gentle grayscale and dimming for paused show (not too dark)
+      // Grayscale and dimming for paused and completed shows
+      const isDimmed = isPaused || isCompleted;
       const posterImg = show.cover_image 
-        ? `<img src="${show.cover_image}" alt="${show.display_name}" class="w-full h-full object-cover transition-all duration-200 ${isPaused ? 'opacity-80 grayscale-[35%]' : ''}" loading="lazy" onerror="this.onerror=null;this.src='https://via.placeholder.com/260x360/1a1a20/4a4a58?text=Poster'">`
-        : `<div class="w-full h-full flex items-center justify-center bg-[#18181c] text-zinc-600 text-xs font-mono ${isPaused ? 'opacity-80 grayscale-[35%]' : ''}">No Art</div>`;
+        ? `<img src="${show.cover_image}" alt="${show.display_name}" class="w-full h-full object-cover transition-all duration-200 ${isDimmed ? 'opacity-80 grayscale-[35%]' : ''}" loading="lazy" onerror="this.onerror=null;this.src='https://via.placeholder.com/260x360/1a1a20/4a4a58?text=Poster'">`
+        : `<div class="w-full h-full flex items-center justify-center bg-[#18181c] text-zinc-600 text-xs font-mono ${isDimmed ? 'opacity-80 grayscale-[35%]' : ''}">No Art</div>`;
 
-      // Paused icon watermark in center of image (Visible ONLY on hover)
-      const pausedWatermark = isPaused ? `
-        <div class="absolute inset-0 flex items-center justify-center pointer-events-none z-10 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
-          <div class="w-10 h-10 rounded-full bg-black/75 border border-zinc-500/50 flex items-center justify-center shadow-lg">
-            <svg class="w-5 h-5 text-zinc-200" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-          </div>
-        </div>
-      ` : '';
-
-      // Pause button color & icon (Amber ⏸ when active to pause, Emerald ▶ when paused to resume)
+      // Pause button color and icon (Amber when active to pause, Emerald when paused to resume)
       const pauseBtnBg = isPaused 
         ? 'bg-emerald-600 hover:bg-emerald-500 text-white' 
         : 'bg-amber-600 hover:bg-amber-500 text-white';
@@ -703,12 +705,11 @@ def get_web_ui_html() -> HTMLResponse:
         : `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>`;
 
       return `
-        <div onclick="viewShowRule(${show.id})" class="bg-[#18181c] border ${isPaused ? 'border-zinc-800' : 'border-[#26262e]'} hover:border-[#444452] hover:-translate-y-1 hover:shadow-lg hover:shadow-black/50 rounded flex flex-col overflow-hidden group cursor-pointer transition-all duration-200 ease-out">
+        <div onclick="viewShowRule(${show.id})" class="bg-[#18181c] border ${isDimmed ? 'border-zinc-800' : 'border-[#26262e]'} hover:border-[#444452] hover:-translate-y-1 hover:shadow-lg hover:shadow-black/50 rounded flex flex-col overflow-hidden group cursor-pointer transition-all duration-200 ease-out">
           
           <!-- Poster Container with hover overlay buttons -->
           <div class="relative w-full aspect-[2/3] bg-[#121215] overflow-hidden">
             ${posterImg}
-            ${pausedWatermark}
 
             <!-- Solid High-Contrast Badge at Top-Left of Image -->
             <div class="absolute top-2 left-2 z-10">
@@ -720,11 +721,13 @@ def get_web_ui_html() -> HTMLResponse:
             <!-- Floating Action Buttons (Visible ONLY on hover) -->
             <div class="absolute bottom-2 inset-x-2 flex items-center justify-between z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none">
               
-              <!-- Left: Pause/Play with colored background -->
+              <!-- Left: Pause/Play with colored background (hidden for completed shows) -->
               <div class="flex items-center gap-1.5 pointer-events-auto">
+                ${!isCompleted ? `
                 <button onclick="event.stopPropagation(); togglePauseShow(${show.id})" class="w-7 h-7 rounded flex items-center justify-center ${pauseBtnBg} shadow-md transition-transform active:scale-90" title="${isPaused ? 'Resume monitoring' : 'Pause monitoring'}">
                   ${pauseIcon}
                 </button>
+                ` : ''}
               </div>
 
               <!-- Right: Delete Button with red background -->
@@ -1098,12 +1101,17 @@ def get_web_ui_html() -> HTMLResponse:
         const res = await fetch(`/api/shows/${showId}/rule`);
         const data = await res.json();
 
-        titleEl.textContent = data.display_name;
-        ruleNameEl.textContent = data.rule_name || 'No Rule Configured';
-
+        const isCompleted = (data.status === 'completed');
+        const isPaused = (data.status === 'paused');
         const isRuleActive = data.enabled === true;
+
+        titleEl.textContent = data.display_name;
+        ruleNameEl.textContent = data.rule_name || (isCompleted ? 'Completed Series' : 'No Rule Configured');
+
         let ruleStatusPill = '';
-        if (isRuleActive) {
+        if (isCompleted) {
+          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Completed</span>';
+        } else if (isRuleActive) {
           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Enabled (Active)</span>';
         } else if (data.status === 'paused') {
           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-amber-950/80 text-amber-300 border border-amber-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Disabled (Paused)</span>';
@@ -1124,6 +1132,18 @@ def get_web_ui_html() -> HTMLResponse:
             `).join('')
           : '<li class="text-zinc-500 text-xs font-mono py-2 text-center bg-[#141418] rounded">No cached RSS articles currently match this rule pattern.</li>';
 
+        const noRulePlaceholder = isCompleted ? `
+          <div class="bg-[#121215] border border-emerald-950/60 rounded-lg p-3 text-center">
+            <div class="text-xs font-semibold text-emerald-400">Completed Series</div>
+            <p class="text-[11px] text-zinc-400 mt-0.5">All episodes have aired and were confirmed downloaded. RSS rule has been disabled.</p>
+          </div>
+        ` : `
+          <div class="bg-[#121215] border border-[#2a2a34] rounded-lg p-3 text-center">
+            <div class="text-xs font-semibold text-sky-400">Upcoming Show (Awaiting Air Date)</div>
+            <p class="text-[11px] text-zinc-400 mt-0.5">The supervisor automatically discovers and arms the verified qBittorrent rule when the episode drops.</p>
+          </div>
+        `;
+
         const regexSections = data.has_rule ? `
           <!-- Must Contain Filter (Editable Regex) -->
           <div class="space-y-1">
@@ -1136,12 +1156,7 @@ def get_web_ui_html() -> HTMLResponse:
             <label for="modal-must-not-contain" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">Must Not Contain Filter</label>
             <input type="text" id="modal-must-not-contain" value="${data.must_not_contain || ''}" placeholder="(720p|480p|...)" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-zinc-300 focus:outline-none focus:border-zinc-500 shadow-inner select-all">
           </div>
-        ` : `
-          <div class="bg-[#121215] border border-[#2a2a34] rounded-lg p-3 text-center">
-            <div class="text-xs font-semibold text-sky-400">Upcoming Show (Awaiting Air Date)</div>
-            <p class="text-[11px] text-zinc-400 mt-0.5">The supervisor automatically discovers and arms the verified qBittorrent rule when the episode drops.</p>
-          </div>
-        `;
+        ` : noRulePlaceholder;
 
         const articlesSection = data.has_rule ? `
           <!-- Live Matching Articles -->

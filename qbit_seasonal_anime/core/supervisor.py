@@ -2,11 +2,11 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 from sqlmodel import Session, select
-from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError
+from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError, get_current_and_next_season
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
-from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
+from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents, has_downloaded_final_episode
 from qbit_seasonal_anime.core.discovery import discover_feed_for_show, flatten_rss_articles
-from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule
+from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule, disable_rule
 from qbit_seasonal_anime.core.stall import check_and_handle_stalls
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
@@ -253,13 +253,16 @@ class Supervisor:
         if not self.settings.anilist_username.strip():
             return logs
 
+        existing_shows = {s.anilist_id: s for s in self.session.exec(select(Monitored)).all()}
         try:
-            seasonal_list = await self.anilist.fetch_user_seasonal_anime(self.settings.anilist_username)
+            seasonal_list = await self.anilist.fetch_user_seasonal_anime(
+                self.settings.anilist_username,
+                monitored_anilist_ids=set(existing_shows.keys()),
+            )
         except AniListError as e:
             logger.warning(f"Could not refresh AniList schedule: {e}")
             return [f"AniList schedule sync error: {e}"]
 
-        existing_shows = {s.anilist_id: s for s in self.session.exec(select(Monitored)).all()}
         new_shows_count = 0
         pref_lang = getattr(self.settings, "title_language", "english")
 
@@ -285,12 +288,6 @@ class Supervisor:
                 if show.display_name != chosen_name:
                     show.display_name = chosen_name
                     updated = True
-                if data.get("next_airing_episode") != show.next_airing_episode:
-                    show.next_airing_episode = data.get("next_airing_episode")
-                    updated = True
-                if data.get("next_airing_at") != show.next_airing_at:
-                    show.next_airing_at = data.get("next_airing_at")
-                    updated = True
                 if data.get("total_episodes") != show.total_episodes:
                     show.total_episodes = data.get("total_episodes")
                     updated = True
@@ -310,6 +307,39 @@ class Supervisor:
                     if a and a.strip():
                         current_aliases.add(a.strip())
                 show.aliases = list(current_aliases)
+
+                # Check if AniList indicates show has finished broadcast
+                is_finished = (data.get("status") == "FINISHED")
+                if is_finished and data.get("next_airing_episode") is None:
+                    if has_downloaded_final_episode(self.session, show):
+                        if show.next_airing_episode is not None:
+                            show.next_airing_episode = None
+                            updated = True
+                        if show.next_airing_at is not None:
+                            show.next_airing_at = None
+                            updated = True
+                        if show.status != MonitoredStatus.COMPLETED:
+                            show.status = MonitoredStatus.COMPLETED
+                            if show.qbit_rule_name:
+                                disable_rule(self.qbit, show.qbit_rule_name)
+                            updated = True
+                            msg = f"Show '{show.display_name}' completed all {show.total_episodes} episodes. Status -> COMPLETED, rule disabled."
+                            logger.info(msg)
+                            logs.append(msg)
+                    else:
+                        # Broadcast finished, but finale not yet downloaded:
+                        # Retain final episode number so the system knows we are awaiting the finale
+                        final_ep = show.total_episodes or show.next_airing_episode
+                        if final_ep and show.next_airing_episode != final_ep:
+                            show.next_airing_episode = final_ep
+                            updated = True
+                else:
+                    if data.get("next_airing_episode") != show.next_airing_episode:
+                        show.next_airing_episode = data.get("next_airing_episode")
+                        updated = True
+                    if data.get("next_airing_at") != show.next_airing_at:
+                        show.next_airing_at = data.get("next_airing_at")
+                        updated = True
 
                 if updated:
                     self.session.add(show)
@@ -422,6 +452,21 @@ class Supervisor:
 
             current_ep = show.next_airing_episode or 1
 
+            # Finale check: If total_episodes is known and current_ep has reached/exceeded total_episodes,
+            # the finale has already aired on TV. Do not advance past total_episodes.
+            if show.total_episodes and current_ep >= show.total_episodes:
+                if has_downloaded_final_episode(self.session, show):
+                    show.next_airing_episode = None
+                    show.next_airing_at = None
+                    show.status = MonitoredStatus.COMPLETED
+                    if show.qbit_rule_name:
+                        disable_rule(self.qbit, show.qbit_rule_name)
+                    self.session.add(show)
+                    msg = f"Show '{show.display_name}' completed all {show.total_episodes} episodes. Status -> COMPLETED, rule disabled."
+                    logger.info(msg)
+                    logs.append(msg)
+                continue
+
             # Determine if rollover should trigger:
             # 1. Show has a confirmed release (last_confirmed_episode is set), OR
             # 2. Episode aired >24 hours ago without AniList updating
@@ -435,6 +480,10 @@ class Supervisor:
                     new_air += timedelta(days=7)
                     new_ep += 1
 
+                # Cap at total_episodes if total_episodes is known
+                if show.total_episodes and new_ep >= show.total_episodes:
+                    new_ep = show.total_episodes
+
                 show.next_airing_episode = new_ep
                 show.next_airing_at = new_air
                 self.session.add(show)
@@ -443,6 +492,71 @@ class Supervisor:
                 msg = f"Show '{show.display_name}': Rolled schedule to Ep {new_ep} ({air_str})."
                 logger.info(msg)
                 logs.append(msg)
+
+        if logs:
+            self.session.commit()
+
+        return logs
+
+    def prune_past_season_shows(self) -> List[str]:
+        """
+        Remove completed shows from past seasons when the next season begins.
+        Continuing cours that extend into the current or future season are preserved.
+        """
+        logs = []
+        now = utc_now()
+        ((cur_season, cur_year), _) = get_current_and_next_season()
+        season_order = {"WINTER": 1, "SPRING": 2, "SUMMER": 3, "FALL": 4}
+        cur_season_idx = cur_year * 10 + season_order.get(cur_season.upper(), 0)
+
+        all_shows = self.session.exec(select(Monitored)).all()
+
+        for show in all_shows:
+            # Only evaluate shows with a known season
+            if not show.season_year or not show.season_name:
+                continue
+
+            show_season_idx = show.season_year * 10 + season_order.get(show.season_name.upper(), 0)
+            if show_season_idx >= cur_season_idx:
+                # Show is from current or upcoming season -> keep
+                continue
+
+            # Show started in a past season. Determine if it is an extending cour:
+            # Extending cours are still airing (not completed, has upcoming air date, or pending episodes)
+            air_at = show.next_airing_at
+            if air_at and air_at.tzinfo is None:
+                air_at = air_at.replace(tzinfo=timezone.utc)
+
+            is_extending_cour = (
+                show.status != MonitoredStatus.COMPLETED
+                and (
+                    (air_at is not None and air_at > now)
+                    or (show.total_episodes is None)
+                    or ((show.last_confirmed_episode or 0) < (show.total_episodes or 1))
+                )
+            )
+
+            if is_extending_cour:
+                # Preserve continuing cour
+                continue
+
+            # Completed or finished show from a past season -> prune
+            if show.qbit_rule_name:
+                try:
+                    delete_rule(self.qbit, show.qbit_rule_name)
+                except Exception as e:
+                    logger.debug(f"Could not delete rule '{show.qbit_rule_name}' during seasonal prune: {e}")
+                show.qbit_rule_name = None
+
+            # Delete related RuleHistory
+            hist = self.session.exec(select(RuleHistory).where(RuleHistory.monitored_id == show.id)).all()
+            for h in hist:
+                self.session.delete(h)
+
+            self.session.delete(show)
+            msg = f"Season transition ({cur_season} {cur_year}): Pruned completed show '{show.display_name}' from past season ({show.season_name} {show.season_year})."
+            logger.info(msg)
+            logs.append(msg)
 
         if logs:
             self.session.commit()
@@ -459,19 +573,22 @@ class Supervisor:
         # 2. Sync schedule and discover newly added seasonal anime from AniList FIRST
         all_logs.extend(await self.sync_anilist_schedule())
 
-        # 3. Bootstrap any new/unassigned shows
+        # 3. Prune finished shows from past seasons (extending cours are preserved)
+        all_logs.extend(self.prune_past_season_shows())
+
+        # 4. Bootstrap any new/unassigned shows
         all_logs.extend(self.bootstrap_unassigned_shows())
 
-        # 4. Confirmation loop for active downloads and RSS releases
+        # 5. Confirmation loop for active downloads and RSS releases
         all_logs.extend(verify_and_confirm_torrents(self.session, self.qbit, self.settings))
 
-        # 5. Reconcile schedule rollover (+7d weekly heuristic)
+        # 6. Reconcile schedule rollover (+7d weekly heuristic)
         all_logs.extend(self.reconcile_schedule_rollover())
 
-        # 6. Refresh & synchronize active rules in qBittorrent
+        # 7. Refresh & synchronize active rules in qBittorrent
         all_logs.extend(self.sync_active_rules())
 
-        # 7. Check for stalled releases & trigger fallback
+        # 8. Check for stalled releases & trigger fallback / finished show completion
         all_logs.extend(check_and_handle_stalls(self.session, self.qbit, self.settings))
 
         # 7. Summary breakdown

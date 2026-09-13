@@ -345,3 +345,19 @@ def delete_rule(qbit_client: QBitClient, rule_name: str) -> None:
         qbit_client.remove_rss_rule(rule_name=rule_name)
     except QbitClientError as e:
         logger.warning(f"Could not delete rule '{rule_name}': {e}")
+
+
+def disable_rule(qbit_client: QBitClient, rule_name: str) -> None:
+    """Disable an RSS auto-downloading rule in qBittorrent without deleting it."""
+    if not rule_name:
+        return
+    try:
+        rules = qbit_client.get_rss_rules()
+        if rule_name in rules:
+            rdef = rules[rule_name]
+            if rdef.get("enabled") is not False:
+                rdef["enabled"] = False
+                qbit_client.set_rss_rule(rule_name=rule_name, rule_def=rdef)
+                logger.info(f"Disabled RSS rule '{rule_name}' in qBittorrent.")
+    except Exception as e:
+        logger.debug(f"Could not disable rule '{rule_name}': {e}")

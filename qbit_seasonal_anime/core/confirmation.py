@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import logging
 from typing import List, Optional
-from sqlmodel import Session, select
+from sqlmodel import Session, select, or_
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.matching import match_release_to_show
 from qbit_seasonal_anime.core.discovery import flatten_rss_articles, parse_article_date
@@ -220,3 +220,39 @@ def verify_and_confirm_rules_from_feeds(
 
 # Backward compatibility alias
 verify_and_confirm_torrents = verify_and_confirm_rules_from_feeds
+
+
+def has_downloaded_final_episode(session: Session, show: Monitored) -> bool:
+    """
+    Return True if the final episode of a show has been matched/downloaded by qBittorrent.
+    Checks:
+    1. show.total_episodes is known and positive.
+    2. show.last_confirmed_episode >= show.total_episodes, OR
+       match_history has a recorded match for episode >= show.total_episodes.
+    """
+    if not show.total_episodes or show.total_episodes <= 0:
+        return False
+
+    if (show.last_confirmed_episode or 0) >= show.total_episodes:
+        return True
+
+    # Check match history by monitored_id or show_name
+    match_conditions = []
+    if show.id:
+        match_conditions.append(MatchHistory.monitored_id == show.id)
+    if show.display_name:
+        match_conditions.append(MatchHistory.show_name == show.display_name)
+
+    if match_conditions:
+        mh = session.exec(
+            select(MatchHistory).where(
+                or_(*match_conditions),
+                MatchHistory.episode >= show.total_episodes,
+            )
+        ).first()
+        if mh:
+            show.last_confirmed_episode = max(show.last_confirmed_episode or 0, mh.episode or show.total_episodes)
+            session.add(show)
+            return True
+
+    return False

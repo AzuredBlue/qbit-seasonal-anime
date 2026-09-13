@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 import pytest
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from qbit_seasonal_anime.core.supervisor import Supervisor
 from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, Settings, utc_now
@@ -81,8 +81,8 @@ def test_continuous_numbering_rolls_to_next_seasonal_episode(session):
     assert air_at > now
 
 
-def test_finale_rolls_over_by_default_without_local_completion(session):
-    """Season finale rolls over by default (+7d) without falsely marking completed locally."""
+def test_finale_completes_when_all_episodes_confirmed(session):
+    """When season finale has aired and all episodes confirmed, mark COMPLETED and delete rule."""
     now = utc_now()
     show = Monitored(
         id=3,
@@ -100,6 +100,9 @@ def test_finale_rolls_over_by_default_without_local_completion(session):
     session.commit()
 
     mock_qbit = MagicMock()
+    mock_qbit.get_rss_rules.return_value = {
+        "[Seasonal] THE GHOST IN THE SHELL": {"enabled": True}
+    }
     mock_anilist = MagicMock()
     settings = Settings(id=1, base_dir="/tmp")
     supervisor = Supervisor(session=session, qbit=mock_qbit, anilist=mock_anilist, settings=settings)
@@ -107,14 +110,120 @@ def test_finale_rolls_over_by_default_without_local_completion(session):
     logs = supervisor.reconcile_schedule_rollover()
     session.refresh(show)
 
-    # Must remain FIXED with rule intact (never completed locally), but roll forward to next week
-    assert show.status == MonitoredStatus.FIXED
-    assert show.next_airing_episode == 11
+    assert show.status == MonitoredStatus.COMPLETED
+    assert show.next_airing_episode is None
+    assert show.next_airing_at is None
     assert show.qbit_rule_name == "[Seasonal] THE GHOST IN THE SHELL"
+    mock_qbit.set_rss_rule.assert_called_with(
+        rule_name="[Seasonal] THE GHOST IN THE SHELL",
+        rule_def={"enabled": False},
+    )
+
+
+def test_finale_waits_for_download_when_not_confirmed(session):
+    """When season finale has aired but not yet confirmed downloaded, do not roll past total_episodes."""
+    now = utc_now()
+    show = Monitored(
+        id=35,
+        anilist_id=1035,
+        display_name="Finale Waiting Anime",
+        aliases_json='["Finale Waiting"]',
+        status=MonitoredStatus.FIXED,
+        total_episodes=12,
+        next_airing_episode=12,
+        next_airing_at=now - timedelta(hours=5),
+        last_confirmed_episode=11,  # Ep 12 not downloaded yet
+        qbit_rule_name="[Seasonal] Finale Waiting",
+    )
+    session.add(show)
+    session.commit()
+
+    mock_qbit = MagicMock()
+    mock_anilist = MagicMock()
+    settings = Settings(id=1, base_dir="/tmp")
+    supervisor = Supervisor(session=session, qbit=mock_qbit, anilist=mock_anilist, settings=settings)
+
+    logs = supervisor.reconcile_schedule_rollover()
+    session.refresh(show)
+
+    assert show.status == MonitoredStatus.FIXED
+    assert show.next_airing_episode == 12  # Stays at 12, does not advance to phantom Ep 13!
+    assert show.qbit_rule_name == "[Seasonal] Finale Waiting"
     mock_qbit.delete_rss_rule.assert_not_called()
-    assert show.next_airing_at is not None
-    air_at = show.next_airing_at if show.next_airing_at.tzinfo else show.next_airing_at.replace(tzinfo=timezone.utc)
-    assert air_at > now
+
+
+def test_prune_past_season_shows(session):
+    """Past-season completed shows are pruned on new season arrival, while continuing cours are preserved."""
+    now = utc_now()
+
+    # Show 1: Summer 2026 completed show
+    show_summer_done = Monitored(
+        id=10,
+        anilist_id=1010,
+        display_name="Summer Completed Show",
+        aliases_json='["Summer Completed"]',
+        status=MonitoredStatus.COMPLETED,
+        season_name="SUMMER",
+        season_year=2026,
+        total_episodes=12,
+        last_confirmed_episode=12,
+        qbit_rule_name="[Seasonal] Summer Completed",
+    )
+
+    # Show 2: Summer 2026 continuing cour extending into Fall (e.g. 24 eps, ep 11 aired, status FIXED)
+    show_extending = Monitored(
+        id=20,
+        anilist_id=1020,
+        display_name="Extending Cour Show",
+        aliases_json='["Extending Cour"]',
+        status=MonitoredStatus.FIXED,
+        season_name="SUMMER",
+        season_year=2026,
+        total_episodes=24,
+        next_airing_episode=12,
+        next_airing_at=now + timedelta(days=2),
+        last_confirmed_episode=11,
+        qbit_rule_name="[Seasonal] Extending Cour",
+    )
+
+    # Show 3: Current season Fall 2026 show
+    show_fall_active = Monitored(
+        id=30,
+        anilist_id=1030,
+        display_name="Fall 2026 New Show",
+        aliases_json='["Fall New"]',
+        status=MonitoredStatus.FIXED,
+        season_name="FALL",
+        season_year=2026,
+        total_episodes=12,
+        next_airing_episode=1,
+        next_airing_at=now + timedelta(days=5),
+        qbit_rule_name="[Seasonal] Fall New",
+    )
+
+    session.add(show_summer_done)
+    session.add(show_extending)
+    session.add(show_fall_active)
+    session.commit()
+
+    mock_qbit = MagicMock()
+    mock_anilist = MagicMock()
+    settings = Settings(id=1, base_dir="/tmp")
+    supervisor = Supervisor(session=session, qbit=mock_qbit, anilist=mock_anilist, settings=settings)
+
+    # Simulate that we are in FALL 2026
+    from unittest.mock import patch
+    with patch("qbit_seasonal_anime.core.supervisor.get_current_and_next_season", return_value=(("FALL", 2026), ("WINTER", 2027))):
+        logs = supervisor.prune_past_season_shows()
+
+    all_ids = {s.id for s in session.exec(select(Monitored)).all()}
+    # Show 10 (Summer completed) should be pruned
+    assert 10 not in all_ids
+    # Show 20 (Extending cour) should be preserved!
+    assert 20 in all_ids
+    # Show 30 (Fall show) should be preserved!
+    assert 30 in all_ids
+    assert any("Pruned completed show 'Summer Completed Show'" in log for log in logs)
 
 
 def test_stale_fixed_show_overdue_advance(session):

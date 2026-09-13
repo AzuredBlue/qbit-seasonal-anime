@@ -223,27 +223,65 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning fetching cached feed articles: {e}", "DEBUG")
 
+    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
+    saved_must_not = qbit_rule_data.get("mustNotContain") or show.custom_must_not or default_must_not
+
+    # Determine the saved regex for this show:
+    # 1. Active qBittorrent rule mustContain
+    # 2. User's explicitly configured custom_regex
+    # 3. MatchHistory matched_regex (the exact regex successfully matched in history)
+    # 4. Matched title & release group pattern (e.g. 'Tenmaku no Jaadugar')
+    # 5. Fallback multi-alias pattern for active shows waiting for first match
+    saved_regex = qbit_rule_data.get("mustContain") or show.custom_regex
+    if not saved_regex and show.id:
+        hist_match = session.exec(
+            select(MatchHistory)
+            .where(MatchHistory.monitored_id == show.id)
+            .where(MatchHistory.matched_regex != None)
+            .order_by(MatchHistory.created_at.desc())
+        ).first()
+        if hist_match and hist_match.matched_regex:
+            saved_regex = hist_match.matched_regex
+
+    if not saved_regex and show.matched_title:
+        from qbit_seasonal_anime.core.rules import build_regex_pattern
+        saved_regex = build_regex_pattern(
+            show.aliases,
+            matched_title=show.matched_title,
+            release_group=show.matched_release_group,
+        )
+
+    if not saved_regex and feed:
+        from qbit_seasonal_anime.core.rules import build_regex_pattern
+        saved_regex = build_regex_pattern(show.aliases)
+
     # If qBittorrent in-memory matchingArticles API returned empty, evaluate regex against cached feed articles
-    if not matched_articles and feed_items:
+    if not matched_articles and feed_items and saved_regex:
         try:
-            from qbit_seasonal_anime.core.rules import build_regex_pattern
             import re
+            must_re = re.compile(saved_regex, re.IGNORECASE)
+            must_not_re = re.compile(saved_must_not, re.IGNORECASE) if saved_must_not else None
 
-            must_pattern = qbit_rule_data.get("mustContain") or build_regex_pattern(show)
-            must_not_pattern = qbit_rule_data.get("mustNotContain")
-
-            if must_pattern:
-                must_re = re.compile(must_pattern)
-                must_not_re = re.compile(must_not_pattern) if must_not_pattern else None
-
-                for item in feed_items:
-                    title = item.get("title", "") if isinstance(item, dict) else str(item)
-                    if must_re.search(title):
-                        if must_not_re and must_not_re.search(title):
-                            continue
+            for item in feed_items:
+                title = item.get("title", "") if isinstance(item, dict) else str(item)
+                if must_re.search(title):
+                    if must_not_re and must_not_re.search(title):
+                        continue
+                    if title not in matched_articles:
                         matched_articles.append(title)
         except Exception as e:
             state.add_log(f"Warning matching against cached articles: {e}", "DEBUG")
+
+    # For confirmed/completed shows, also ensure any releases stored in MatchHistory are shown
+    if show.id:
+        hist_records = session.exec(
+            select(MatchHistory)
+            .where(MatchHistory.monitored_id == show.id)
+            .order_by(MatchHistory.episode.desc())
+        ).all()
+        for hr in hist_records:
+            if hr.release_title and hr.release_title not in matched_articles:
+                matched_articles.append(hr.release_title)
 
     if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
         from qbit_seasonal_anime.core.matching import match_release_to_show
@@ -357,13 +395,13 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         "show_id": show.id,
         "display_name": effective_display_name,
         "cover_image": show.cover_image,
-        "has_rule": bool(show.current_feed_id or show.qbit_rule_name),
+        "has_rule": bool(show.current_feed_id or show.qbit_rule_name or show.status == MonitoredStatus.COMPLETED or saved_regex),
         "rule_name": show.qbit_rule_name or expected_rule_name,
         "enabled": rule_is_enabled,
         "feed_name": feed.qbit_feed_name if feed else None,
         "feed_url": feed.qbit_feed_url if feed else None,
-        "must_contain": qbit_rule_data.get("mustContain") or show.custom_regex or (build_regex_pattern(show.aliases) if feed else None),
-        "must_not_contain": qbit_rule_data.get("mustNotContain") or show.custom_must_not or default_must_not,
+        "must_contain": saved_regex,
+        "must_not_contain": saved_must_not,
         "save_path": compress_home_path(raw_save_path),
         "save_folder": (show.save_folder if is_custom_folder else "") or "",
         "current_feed_id": show.current_feed_id or 0,
@@ -407,6 +445,14 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         show.custom_regex = req.must_contain.strip() if req.must_contain.strip() else None
     if req.must_not_contain is not None:
         show.custom_must_not = req.must_not_contain.strip() if req.must_not_contain.strip() else None
+
+    # For completed shows, update metadata in DB but do not create or re-enable an RSS rule in qBittorrent
+    if show.status == MonitoredStatus.COMPLETED:
+        if req.current_feed_id is not None and req.current_feed_id > 0:
+            show.current_feed_id = req.current_feed_id
+        session.add(show)
+        session.commit()
+        return {"status": "success", "message": f"Updated metadata for completed show '{show.display_name}'."}
 
     category = req.category.strip() if req.category is not None and req.category.strip() else settings.default_category
     ratio_limit = req.ratio_limit if req.ratio_limit is not None and req.ratio_limit >= 0 else settings.default_seed_ratio
