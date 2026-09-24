@@ -151,7 +151,7 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
           <!-- Enlarged card grid with smooth hover transition -->
-          <div id="grid-releasing" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4">
+          <div id="grid-releasing" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
             <!-- Cards rendered by JS -->
           </div>
         </div>
@@ -163,7 +163,7 @@ def get_web_ui_html() -> HTMLResponse:
             <span id="header-count-planned" class="text-xs text-zinc-500 font-mono">(0)</span>
           </div>
           <!-- Enlarged card grid with smooth hover transition -->
-          <div id="grid-planned" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-4">
+          <div id="grid-planned" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
             <!-- Cards rendered by JS -->
           </div>
         </div>
@@ -740,8 +740,8 @@ def get_web_ui_html() -> HTMLResponse:
           </div>
 
           <!-- Clean, Perfectly Uniform Text Area Underneath -->
-          <div class="p-3 flex flex-col justify-between bg-[#18181c] h-[5.25rem]">
-            <h3 class="text-xs sm:text-sm font-semibold text-zinc-100 leading-snug line-clamp-2 h-[2.5rem] flex items-start" title="${show.display_name}">
+          <div class="p-2.5 flex flex-col justify-between bg-[#18181c] min-h-[5.5rem]">
+            <h3 class="text-[13px] font-semibold text-zinc-100 leading-[1.4] line-clamp-2 min-h-[2.55rem] overflow-hidden pb-[1px]" title="${show.display_name}">
               ${show.display_name}
             </h3>
 
