@@ -5,7 +5,6 @@ from qbit_seasonal_anime.core.matching import (
     normalize_title,
     parse_release_title,
 )
-from tests.fixtures import SAMPLE_TORRENT_RELEASES
 
 
 class TestMatching(unittest.TestCase):
@@ -54,7 +53,6 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(parsed["episode"], 4)
 
     def test_parse_release_title_multiword_quality_stripping(self):
-        # Multi-word titles where quality tag is at the end
         item = "Ore dake Level Up na Ken 1080p.mkv"
         parsed = parse_release_title(item)
         self.assertEqual(parsed["title"], "Ore dake Level Up na Ken")
@@ -72,13 +70,11 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(extract_release_group_tag("Show S01E05 1080p-VARYG.mkv"), "VARYG")
 
     def test_parse_release_title_audio_channels_and_fps(self):
-        # Audio channels like 2.0 or 5.1 must not be mistaken for episode numbers
         p1 = parse_release_title("[Hentai] Ushiro no Shoumen Kamui-san - 04 [WEB 1080p DDP 2.0. H 264] (Uncensored)")
         self.assertEqual(p1["episode"], 4)
         self.assertEqual(p1["release_group"], "Hentai")
         self.assertEqual(p1["title"], "Ushiro no Shoumen Kamui-san")
 
-        # High framerate specs must not be mistaken for episode numbers
         p2 = parse_release_title("[Raze] Youjo Senki S2 - 08 x265 10bit 1080p 143.8561fps.mkv")
         self.assertEqual(p2["season"], 2)
         self.assertEqual(p2["episode"], 8)
@@ -86,20 +82,17 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(p2["title"], "Youjo Senki")
 
     def test_parse_release_title_years_and_dual_notation(self):
-        # 4-digit years in movie/batch titles must not be mistaken for episode numbers
         p1 = parse_release_title("Gintama Yoshiwara in Flames 2026 1080p NF WEB-DL DUAL DDP5.1 H.264-VARYG (Shin Gintama Movie: Yoshiwara Daienjou, Dual-Audio)")
         self.assertIsNone(p1["episode"])
         self.assertEqual(p1["release_group"], "VARYG")
         self.assertEqual(p1["title"], "Gintama Yoshiwara in Flames")
 
-        # Dual episode notations like "Title - 38 (S01E38)"
         p2 = parse_release_title("[Lazyleido-Mini] DIGIMON BEATBREAK - 38 (S01E38) - (WEB 1080p AV1 10-bit AAC 2.0) [F949F3F5]")
         self.assertEqual(p2["season"], 1)
         self.assertEqual(p2["episode"], 38)
         self.assertEqual(p2["release_group"], "Lazyleido-Mini")
         self.assertEqual(p2["title"], "DIGIMON BEATBREAK")
 
-        # Long titles with numbers in the middle
         p3 = parse_release_title("[Erai-raws] Koko wa Ore ni Makasete Saki ni Ike to Itte kara 10-nen ga Tattara Densetsu ni Natteita - 09 [1080p CR WEBRip HEVC AAC][MultiSub][1435F93B]")
         self.assertEqual(p3["episode"], 9)
         self.assertEqual(p3["release_group"], "Erai-raws")

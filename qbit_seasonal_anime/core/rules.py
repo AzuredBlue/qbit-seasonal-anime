@@ -1,16 +1,18 @@
 import logging
 import os
 import re
+from datetime import timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
-from qbit_seasonal_anime.db.models import Monitored, Feed
+from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.rules")
 
 
 ROMAN_TO_INT = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
 INT_TO_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
+DEFAULT_MUST_NOT = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
 
 
 def generate_season_variants(alias: str) -> List[str]:
@@ -59,9 +61,7 @@ def sanitize_regex_token(title: str) -> str:
     """Escape true regex metacharacters while keeping spaces and hyphens clean and human-readable."""
     if not title:
         return ""
-    # Escape only characters with special regex meaning outside brackets: () [] {} + * ? ^ $ | . \
     escaped = re.sub(r"([\\^$.|?*+()\[\]{}])", r"\\\1", title.strip())
-    # Normalize multiple whitespaces down to a single clean space
     return re.sub(r"\s+", " ", escaped)
 
 
@@ -71,17 +71,13 @@ def build_regex_pattern(
     release_group: Optional[str] = None,
 ) -> str:
     """
-    Build a clean, minimal case-insensitive regex pattern for qBittorrent RSS rules.
-    If matched_title is known (e.g. verified during confirmation/discovery), creates a precise
-    and simple rule using ONLY that matched title (e.g. 'Mushoku\\s+Tensei\\s+S3').
+    Build a case-insensitive qBittorrent RSS rule pattern.
+    If matched_title is known, use it as the rule; otherwise build an alternation from aliases.
     """
-    # 1. Simple, clean matched title rule (Works / Confirmed state)
     if matched_title and matched_title.strip():
         token = sanitize_regex_token(matched_title)
         return rf"{token}"
 
-    # 2. Fallback for unconfirmed / unreleased shows before first match:
-    # Filter to clean English / Romaji / Latin aliases to keep rule minimal
     valid_aliases = [a.strip() for a in aliases if a and a.strip()]
     latin_aliases = [a for a in valid_aliases if any(c.isascii() and c.isalnum() for c in a)]
     target_aliases = latin_aliases if latin_aliases else valid_aliases
@@ -104,7 +100,7 @@ def sanitize_folder_name(name: str) -> str:
     r"""
     Clean and sanitize anime title into a safe, valid, cross-platform folder name.
     - Replaces slashes between words or fractions (e.g. 'Ranma 1/2' -> 'Ranma 1-2', 'Fate/stay' -> 'Fate-stay')
-    - Replaces remaining slashes and backslashes with hyphens
+    - Replaces remaining slashes and backslashes with ' - '
     - Replaces colons with ' - '
     - Removes forbidden filesystem characters: < > : " / \ | ? * and control chars
     - Collapses multiple hyphens and whitespace
@@ -112,15 +108,10 @@ def sanitize_folder_name(name: str) -> str:
     """
     if not name:
         return "Anime"
-    # Replace slashes between alphanumeric words or numbers (e.g. 1/2 -> 1-2, Fate/stay -> Fate-stay)
     s = re.sub(r"(\w+)[/](\w+)", r"\1-\2", name)
-    # Replace remaining slashes, backslashes, pipes with hyphens
     s = re.sub(r"[/\\|]", " - ", s)
-    # Replace colons with ' - '
     s = re.sub(r":\s*", " - ", s)
-    # Remove all forbidden characters < > " ? * and control chars
     s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", s)
-    # Collapse multiple hyphens or spaces
     s = re.sub(r"\s*-\s*-\s*", " - ", s)
     s = re.sub(r"\s+", " ", s)
     s = s.strip(" .")
@@ -169,7 +160,6 @@ def resolve_save_path(base_dir: str, display_name: str, custom_save_folder: Opti
                 raw = clean_name
         return str(Path(os.path.expanduser(raw)).resolve()) if (raw.startswith("/") or raw.startswith("~") or (len(raw) > 2 and raw[1] == ":")) else raw
 
-    # Base dir handling
     if not base_dir or not base_dir.strip():
         return ""
 
@@ -196,9 +186,6 @@ def is_show_rule_enabled(monitored: Monitored) -> bool:
     - Unconfirmed upcoming shows whose air date is in the future: False (prevents pre-air false positives)
     - Unconfirmed shows that have aired / are in hunting mode: True
     """
-    from qbit_seasonal_anime.db.models import MonitoredStatus, utc_now
-    from datetime import timezone
-
     if monitored.status in (MonitoredStatus.PAUSED, MonitoredStatus.COMPLETED):
         return False
 
@@ -238,7 +225,6 @@ def build_rule_definition(
     """Construct the JSON payload for qBittorrent's RSS rule definition."""
     effective_group = release_group or monitored.matched_release_group
     
-    # Priority: explicit argument -> stored custom regex -> auto-generated regex
     regex = (
         must_contain
         if must_contain is not None
@@ -259,11 +245,10 @@ def build_rule_definition(
     )
     save_path = resolve_save_path(base_dir, effective_display_name, monitored.save_folder)
 
-    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
     effective_must_not = (
         must_not_contain
         if must_not_contain is not None
-        else (getattr(monitored, "custom_must_not", None) or default_must_not)
+        else (getattr(monitored, "custom_must_not", None) or DEFAULT_MUST_NOT)
     )
 
     is_enabled = is_show_rule_enabled(monitored) if enabled is None else enabled
@@ -326,7 +311,6 @@ def create_or_update_rule(
 
     qbit_client.set_rss_rule(rule_name=rule_name, rule_def=rule_def)
 
-    # Sanity check: verify qBittorrent accepted the rule
     try:
         matched = qbit_client.get_matching_articles(rule_name)
         match_count = sum(len(v) for v in matched.values()) if isinstance(matched, dict) else 0

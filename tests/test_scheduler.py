@@ -57,7 +57,6 @@ class TestScheduler(unittest.TestCase):
 
     def test_default_interval_when_all_shows_working(self):
         now = utc_now()
-        # Even if a working show has an episode airing soon, qBit handles it, so we sleep default interval
         show = Monitored(
             id=1,
             anilist_id=101,
@@ -77,7 +76,6 @@ class TestScheduler(unittest.TestCase):
         self.assertIn("working rules", reason)
 
     def test_no_hunting_for_show_without_release_date(self):
-        # Shows like Aoashi 2nd Season without an air date should NOT trigger hunting mode
         show = Monitored(
             id=2,
             anilist_id=202,
@@ -119,7 +117,6 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(dur, 315)
     def test_hunting_mode_when_previous_episode_aired_recently(self):
         now = utc_now()
-        # Ep 22 aired 3 hours ago; AniList bumped next_airing_episode to 23 and next_airing_at to 7 days away
         show = Monitored(
             id=4,
             anilist_id=404,
@@ -140,7 +137,6 @@ class TestScheduler(unittest.TestCase):
 
     def test_no_hunting_when_unconfirmed_show_next_episode_is_days_away_and_no_recent_air(self):
         now = utc_now()
-        # Premiere Ep 1 is 5 days away -> Should not hunt, should sleep default interval (or until air time)
         show = Monitored(
             id=5,
             anilist_id=505,

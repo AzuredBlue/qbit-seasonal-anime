@@ -12,12 +12,7 @@ USER_SEASONAL_QUERY = """
 query ($userName: String) {
   MediaListCollection(userName: $userName, type: ANIME, status_in: [CURRENT, PLANNING]) {
     lists {
-      name
-      status
       entries {
-        id
-        status
-        progress
         media {
           id
           title {
@@ -27,19 +22,16 @@ query ($userName: String) {
             userPreferred
           }
           synonyms
-          format
           status
           episodes
           nextAiringEpisode {
             airingAt
-            timeUntilAiring
             episode
           }
           season
           seasonYear
           coverImage {
             large
-            medium
           }
         }
       }
@@ -59,16 +51,12 @@ query ($id: Int) {
       userPreferred
     }
     synonyms
-    format
     status
     episodes
     nextAiringEpisode {
       airingAt
-      timeUntilAiring
       episode
     }
-    season
-    seasonYear
   }
 }
 """
@@ -191,11 +179,6 @@ class AniListClient:
                 season_year = media.get("seasonYear")
                 next_airing = media.get("nextAiringEpisode")
 
-                # Filter criteria:
-                # 1. Currently releasing anime (status == RELEASING)
-                # 2. Upcoming show for next season (or unreleased in current season)
-                # 3. Finished show from the current season
-                # 4. Any show already monitored in the database (e.g. extending cour finishing)
                 is_currently_releasing = (status == "RELEASING")
                 is_current_or_next_season_planned = (
                     (season == next_season and season_year == next_year) or
@@ -209,7 +192,6 @@ class AniListClient:
                 if not (is_currently_releasing or is_current_or_next_season_planned or is_current_season_finished or is_monitored):
                     continue
 
-                # Build alias list
                 titles = media.get("title", {})
                 aliases = set()
                 for key in ["romaji", "english", "native", "userPreferred"]:
@@ -220,7 +202,6 @@ class AniListClient:
                     if syn and isinstance(syn, str) and syn.strip():
                         aliases.add(syn.strip())
 
-                # Next airing
                 next_airing_episode = next_airing.get("episode") if next_airing else None
                 next_airing_at = None
                 if next_airing and next_airing.get("airingAt"):

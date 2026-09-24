@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import timedelta, timezone
 import logging
 from typing import List
 from sqlmodel import Session, select
@@ -24,7 +24,6 @@ def check_and_handle_stalls(
     now = utc_now()
     stall_delta = timedelta(hours=settings.stall_wait_hours)
 
-    # 1. Check for finished shows
     active_stmt = select(Monitored).where(
         Monitored.status.in_([MonitoredStatus.UNCONFIRMED, MonitoredStatus.FIXED])
     )
@@ -32,11 +31,9 @@ def check_and_handle_stalls(
     all_feeds = session.exec(select(Feed).order_by(Feed.priority)).all()
 
     for show in shows:
-        # Finished show check
         is_finished_broadcast = (show.next_airing_at is None and show.next_airing_episode is None)
         air_at = show.next_airing_at
         if air_at and air_at.tzinfo is None:
-            from datetime import timezone
             air_at = air_at.replace(tzinfo=timezone.utc)
         has_aired_finale = (
             show.total_episodes is not None
@@ -56,24 +53,16 @@ def check_and_handle_stalls(
                 msg = f"Show '{show.display_name}' completed all {show.total_episodes} episodes. Status -> COMPLETED, rule disabled."
                 logger.info(msg)
                 logs.append(msg)
-                continue
-            else:
-                # Finished broadcast on AniList, awaiting final episode in RSS
-                continue
+            continue
 
-        # Stall checks ONLY apply to UNCONFIRMED (testing) shows
         if show.status != MonitoredStatus.UNCONFIRMED:
             continue
 
-        # Active show stall check for unconfirmed shows
         if show.next_airing_at:
-            # Handle naive or timezone-aware comparisons cleanly
             air_at = show.next_airing_at
             if air_at.tzinfo is None:
-                from datetime import timezone
                 air_at = air_at.replace(tzinfo=timezone.utc)
 
-            # Query most recent rule history row for this show
             hist_stmt = (
                 select(RuleHistory)
                 .where(RuleHistory.monitored_id == show.id)
@@ -81,10 +70,8 @@ def check_and_handle_stalls(
             )
             latest_hist = session.exec(hist_stmt).first()
 
-            # Rule grace period: give newly created/fallback rules time to catch up
             rule_created_at = latest_hist.created_at if latest_hist else air_at
             if rule_created_at and rule_created_at.tzinfo is None:
-                from datetime import timezone
                 rule_created_at = rule_created_at.replace(tzinfo=timezone.utc)
 
             cutoff_time = max(air_at, rule_created_at) + stall_delta
@@ -101,7 +88,6 @@ def check_and_handle_stalls(
                     logger.warning(msg)
                     logs.append(msg)
 
-                    # Record stalled history
                     stalled_feed_id = show.current_feed_id
                     if latest_hist and latest_hist.outcome == RuleOutcome.PENDING:
                         latest_hist.outcome = RuleOutcome.STALLED
@@ -118,21 +104,18 @@ def check_and_handle_stalls(
                         session.add(stalled_hist)
                     session.flush()
 
-                    # Delete current qBit rule
                     if show.qbit_rule_name:
                         delete_rule(qbit_client, show.qbit_rule_name)
 
-                    # Gather excluded feed IDs (feeds that failed or were replaced for this show)
                     failed_hist_stmt = select(RuleHistory.feed_id).where(
                         RuleHistory.monitored_id == show.id,
                         RuleHistory.outcome.in_([RuleOutcome.STALLED, RuleOutcome.FALSE_POSITIVE, RuleOutcome.REPLACED]),
                         RuleHistory.feed_id.isnot(None),
                     )
-                    failed_feed_ids = [fid for fid in session.exec(failed_hist_stmt).all() if fid is not None]
+                    failed_feed_ids = list(session.exec(failed_hist_stmt).all())
                     if stalled_feed_id and stalled_feed_id not in failed_feed_ids:
                         failed_feed_ids.append(stalled_feed_id)
 
-                    # Attempt fallback discovery
                     discovery_res = discover_feed_for_show(
                         monitored=show,
                         feeds=all_feeds,
@@ -145,7 +128,6 @@ def check_and_handle_stalls(
                         show.matched_title = matched_title
                         show.matched_release_group = obs_group
 
-                        # Create rule on fallback feed
                         try:
                             rule_name = create_or_update_rule(
                                 qbit_client=qbit_client,
@@ -178,7 +160,6 @@ def check_and_handle_stalls(
                             logger.error(f"Failed creating fallback rule for '{show.display_name}': {e}")
                             logs.append(f"Error creating fallback rule: {e}")
                     else:
-                        # If no feed had matching cached articles, check if another candidate feed exists (e.g. Feed #2)
                         avail = [f for f in all_feeds if f.id not in failed_feed_ids]
                         if avail:
                             fallback_feed = avail[0]
@@ -194,7 +175,6 @@ def check_and_handle_stalls(
                                 )
                                 show.current_feed_id = fallback_feed.id
                                 show.qbit_rule_name = rule_name
-                                show.status = MonitoredStatus.UNCONFIRMED
                                 session.add(show)
 
                                 new_hist = RuleHistory(
@@ -213,7 +193,6 @@ def check_and_handle_stalls(
                             except QbitClientError as e:
                                 logger.error(f"Failed arming fallback rule: {e}")
                         else:
-                            # All feeds exhausted -> STALLED
                             show.status = MonitoredStatus.STALLED
                             show.current_feed_id = None
                             session.add(show)

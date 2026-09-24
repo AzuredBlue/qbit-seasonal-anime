@@ -44,7 +44,7 @@ def test_continuous_numbering_never_falsely_completed(session):
     assert show.status == MonitoredStatus.FIXED
     assert show.next_airing_episode == 11
     assert show.qbit_rule_name == "[Seasonal] Hyakkano S3"
-    mock_qbit.delete_rss_rule.assert_not_called()
+    mock_qbit.remove_rss_rule.assert_not_called()
 
 
 def test_continuous_numbering_rolls_to_next_seasonal_episode(session):
@@ -82,7 +82,7 @@ def test_continuous_numbering_rolls_to_next_seasonal_episode(session):
 
 
 def test_finale_completes_when_all_episodes_confirmed(session):
-    """When season finale has aired and all episodes confirmed, mark COMPLETED and delete rule."""
+    """When season finale has aired and all episodes confirmed, mark COMPLETED and disable the rule."""
     now = utc_now()
     show = Monitored(
         id=3,
@@ -149,14 +149,13 @@ def test_finale_waits_for_download_when_not_confirmed(session):
     assert show.status == MonitoredStatus.FIXED
     assert show.next_airing_episode == 12  # Stays at 12, does not advance to phantom Ep 13!
     assert show.qbit_rule_name == "[Seasonal] Finale Waiting"
-    mock_qbit.delete_rss_rule.assert_not_called()
+    mock_qbit.remove_rss_rule.assert_not_called()
 
 
 def test_prune_past_season_shows(session):
     """Past-season completed shows are pruned on new season arrival, while continuing cours are preserved."""
     now = utc_now()
 
-    # Show 1: Summer 2026 completed show
     show_summer_done = Monitored(
         id=10,
         anilist_id=1010,
@@ -170,7 +169,6 @@ def test_prune_past_season_shows(session):
         qbit_rule_name="[Seasonal] Summer Completed",
     )
 
-    # Show 2: Summer 2026 continuing cour extending into Fall (e.g. 24 eps, ep 11 aired, status FIXED)
     show_extending = Monitored(
         id=20,
         anilist_id=1020,
@@ -186,7 +184,6 @@ def test_prune_past_season_shows(session):
         qbit_rule_name="[Seasonal] Extending Cour",
     )
 
-    # Show 3: Current season Fall 2026 show
     show_fall_active = Monitored(
         id=30,
         anilist_id=1030,
@@ -211,17 +208,13 @@ def test_prune_past_season_shows(session):
     settings = Settings(id=1, base_dir="/tmp")
     supervisor = Supervisor(session=session, qbit=mock_qbit, anilist=mock_anilist, settings=settings)
 
-    # Simulate that we are in FALL 2026
     from unittest.mock import patch
     with patch("qbit_seasonal_anime.core.supervisor.get_current_and_next_season", return_value=(("FALL", 2026), ("WINTER", 2027))):
         logs = supervisor.prune_past_season_shows()
 
     all_ids = {s.id for s in session.exec(select(Monitored)).all()}
-    # Show 10 (Summer completed) should be pruned
     assert 10 not in all_ids
-    # Show 20 (Extending cour) should be preserved!
     assert 20 in all_ids
-    # Show 30 (Fall show) should be preserved!
     assert 30 in all_ids
     assert any("Pruned completed show 'Summer Completed Show'" in log for log in logs)
 

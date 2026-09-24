@@ -1,16 +1,15 @@
 from datetime import datetime, timezone, timedelta
-import asyncio
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings
-from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, Settings, MonitoredStatus, RuleOutcome, MatchHistory, utc_now
-from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
+from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, MonitoredStatus, RuleOutcome, MatchHistory, utc_now
+from qbit_seasonal_anime.clients.qbit import QBitClient
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
-from qbit_seasonal_anime.core.rules import delete_rule
+from qbit_seasonal_anime.core.rules import DEFAULT_MUST_NOT, delete_rule
 from qbit_seasonal_anime.workers.scheduler import calculate_next_poll_interval
 from qbit_seasonal_anime.server.state import state
 
@@ -29,9 +28,6 @@ def get_qbit(session: Session = Depends(get_db)) -> QBitClient:
     return QBitClient(host=s.qbit_host, username=s.qbit_username, password=s.qbit_password, timeout=10)
 
 
-# -------------------------------------------------------------
-# Shows Endpoints
-# -------------------------------------------------------------
 @router.get("/shows")
 def get_shows(session: Session = Depends(get_db)):
     settings = get_settings(session)
@@ -46,7 +42,6 @@ def get_shows(session: Session = Depends(get_db)):
         if airing_at and airing_at.tzinfo is None:
             airing_at = airing_at.replace(tzinfo=timezone.utc)
 
-        # Classification: Released / Currently Airing vs Planned Next Season / Upcoming
         is_released = (
             s.status in (MonitoredStatus.FIXED, MonitoredStatus.COMPLETED)
             or (s.next_airing_episode is not None and s.next_airing_episode > 1)
@@ -60,7 +55,6 @@ def get_shows(session: Session = Depends(get_db)):
 
         from qbit_seasonal_anime.core.rules import sanitize_folder_name, compress_home_path
         base_template = settings.base_dir or "~/Anime/{name}"
-        # If user explicitly customized save_folder to a custom path, use it; otherwise use effective_display_name
         is_custom_folder = bool(s.save_folder and s.save_folder != sanitize_folder_name(s.display_name) and s.save_folder != sanitize_folder_name(s.title_romaji or "") and s.save_folder != sanitize_folder_name(s.title_english or ""))
         if is_custom_folder and (s.save_folder.startswith("/") or s.save_folder.startswith("~")):
             resolved_save_path = s.save_folder
@@ -107,7 +101,6 @@ def toggle_pause_show(show_id: int, session: Session = Depends(get_db), qbit: QB
         raise HTTPException(status_code=404, detail="Show not found")
 
     if show.status == MonitoredStatus.PAUSED:
-        # Restore the saved pre-pause status, falling back to a sensible guess
         if show.status_before_pause:
             try:
                 show.status = MonitoredStatus(show.status_before_pause)
@@ -196,7 +189,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
     settings = get_settings(session)
     feed = session.get(Feed, show.current_feed_id) if show.current_feed_id else None
 
-    # Fetch live rule from qBittorrent if rule_name exists
     qbit_rule_data = {}
     matched_articles = []
     if show.qbit_rule_name:
@@ -223,15 +215,8 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning fetching cached feed articles: {e}", "DEBUG")
 
-    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
-    saved_must_not = qbit_rule_data.get("mustNotContain") or show.custom_must_not or default_must_not
+    saved_must_not = qbit_rule_data.get("mustNotContain") or show.custom_must_not or DEFAULT_MUST_NOT
 
-    # Determine the saved regex for this show:
-    # 1. Active qBittorrent rule mustContain
-    # 2. User's explicitly configured custom_regex
-    # 3. MatchHistory matched_regex (the exact regex successfully matched in history)
-    # 4. Matched title & release group pattern (e.g. 'Tenmaku no Jaadugar')
-    # 5. Fallback multi-alias pattern for active shows waiting for first match
     saved_regex = qbit_rule_data.get("mustContain") or show.custom_regex
     if not saved_regex and show.id:
         hist_match = session.exec(
@@ -255,7 +240,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         from qbit_seasonal_anime.core.rules import build_regex_pattern
         saved_regex = build_regex_pattern(show.aliases)
 
-    # If qBittorrent in-memory matchingArticles API returned empty, evaluate regex against cached feed articles
     if not matched_articles and feed_items and saved_regex:
         try:
             import re
@@ -272,7 +256,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         except Exception as e:
             state.add_log(f"Warning matching against cached articles: {e}", "DEBUG")
 
-    # For confirmed/completed shows, also ensure any releases stored in MatchHistory are shown
     if show.id:
         hist_records = session.exec(
             select(MatchHistory)
@@ -289,7 +272,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         best_title = None
         best_parsed = None
         for title in matched_articles:
-            is_match, score, parsed = match_release_to_show(title, show.aliases)
+            is_match, _, parsed = match_release_to_show(title, show.aliases)
             if is_match:
                 ep = parsed.get("episode")
                 if ep is not None:
@@ -381,15 +364,13 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
     prefer_english = (getattr(settings, "title_language", "english") == "english")
     effective_display_name = show.title_english if (prefer_english and show.title_english) else (show.title_romaji or show.display_name)
 
-    from qbit_seasonal_anime.core.rules import build_regex_pattern, build_rule_name, is_show_rule_enabled, compress_home_path, resolve_save_path, sanitize_folder_name
+    from qbit_seasonal_anime.core.rules import build_rule_name, is_show_rule_enabled, compress_home_path, resolve_save_path, sanitize_folder_name
     expected_rule_name = build_rule_name(show.id or 0, effective_display_name)
     rule_is_enabled = qbit_rule_data.get("enabled") if "enabled" in qbit_rule_data else is_show_rule_enabled(show)
     
-    # If user explicitly customized save_folder to a custom path, use it; otherwise use effective_display_name
     is_custom_folder = bool(show.save_folder and show.save_folder != sanitize_folder_name(show.display_name) and show.save_folder != sanitize_folder_name(show.title_romaji or "") and show.save_folder != sanitize_folder_name(show.title_english or ""))
     default_save_path = resolve_save_path(settings.base_dir, effective_display_name, show.save_folder if is_custom_folder else None)
     raw_save_path = qbit_rule_data.get("savePath") or default_save_path
-    default_must_not = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
 
     return {
         "show_id": show.id,
@@ -433,7 +414,6 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     old_feed_id = show.current_feed_id
     new_feed_id = None if req.current_feed_id is not None and req.current_feed_id <= 0 else (req.current_feed_id if req.current_feed_id is not None else show.current_feed_id)
 
-    # Update save folder if provided
     if req.save_folder is not None:
         val = req.save_folder.strip()
         if not val or val == "{name}":
@@ -446,7 +426,6 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     if req.must_not_contain is not None:
         show.custom_must_not = req.must_not_contain.strip() if req.must_not_contain.strip() else None
 
-    # For completed shows, update metadata in DB but do not create or re-enable an RSS rule in qBittorrent
     if show.status == MonitoredStatus.COMPLETED:
         if req.current_feed_id is not None and req.current_feed_id > 0:
             show.current_feed_id = req.current_feed_id
@@ -457,7 +436,6 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     category = req.category.strip() if req.category is not None and req.category.strip() else settings.default_category
     ratio_limit = req.ratio_limit if req.ratio_limit is not None and req.ratio_limit >= 0 else settings.default_seed_ratio
 
-    # If old rule exists in qBittorrent, clean it up
     if show.qbit_rule_name:
         try:
             delete_rule(qbit, show.qbit_rule_name)
@@ -466,7 +444,6 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         show.qbit_rule_name = None
 
     if new_feed_id is None:
-        # Reset to Auto-Discover
         show.current_feed_id = None
         show.matched_title = None
         show.matched_release_group = None
@@ -476,14 +453,12 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         state.add_log(f"Reset '{show.display_name}' to Auto-Discover mode.", "INFO")
         return {"status": "success", "message": f"'{show.display_name}' set to Auto-Discover."}
 
-    # User assigned a specific feed
     feed = session.get(Feed, new_feed_id)
     if not feed:
         raise HTTPException(status_code=400, detail="Selected feed not found")
 
     show.current_feed_id = feed.id
 
-    # Check cached RSS articles in that feed to see if we can match immediately
     matched_article = None
     try:
         rss_data = qbit.get_rss_items(with_data=True)
@@ -525,7 +500,6 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         show.qbit_rule_name = rname
         msg = f"Assigned to '{feed.qbit_feed_name}' and matched cached release: {matched_article.get('title')} (Status: Working)"
     else:
-        # Not in current cache -> set to Testing and create broad rule waiting for next episode drop
         show.matched_title = None
         show.matched_release_group = None
         show.status = MonitoredStatus.UNCONFIRMED
@@ -561,7 +535,6 @@ def delete_show(show_id: int, session: Session = Depends(get_db), qbit: QBitClie
         except Exception as e:
             state.add_log(f"Warning deleting rule for '{name}': {e}", "WARNING")
 
-    # Delete history rows
     for h in session.exec(select(RuleHistory).where(RuleHistory.monitored_id == show.id)).all():
         session.delete(h)
     session.flush()
@@ -572,9 +545,6 @@ def delete_show(show_id: int, session: Session = Depends(get_db), qbit: QBitClie
     return {"status": "success", "message": f"Deleted '{name}' from monitoring."}
 
 
-# -------------------------------------------------------------
-# Feeds Endpoints
-# -------------------------------------------------------------
 @router.get("/feeds")
 def get_feeds(session: Session = Depends(get_db)):
     feeds = session.exec(select(Feed).order_by(Feed.priority)).all()
@@ -616,9 +586,6 @@ def sync_feeds(session: Session = Depends(get_db), qbit: QBitClient = Depends(ge
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# -------------------------------------------------------------
-# Settings Endpoints
-# -------------------------------------------------------------
 @router.get("/settings")
 def get_current_settings(session: Session = Depends(get_db)):
     from qbit_seasonal_anime.core.rules import compress_home_path
@@ -715,19 +682,14 @@ async def sync_anilist_now(session: Session = Depends(get_db)):
     sup = Supervisor(session=session, qbit=qbit, anilist=anilist_client, settings=s)
     try:
         logs = []
-        # 1. Sync RSS feeds from qBittorrent
         logs.extend(sup.sync_feeds())
-        # 2. Sync schedule and import newly added shows from AniList
         sync_logs = await sup.sync_anilist_schedule()
         logs.extend(sync_logs)
-        # 3. Automatically rediscover and bootstrap rules for new/unassigned shows
         bootstrap_logs = sup.bootstrap_unassigned_shows()
         logs.extend(bootstrap_logs)
-        # 4. Verify and confirm rules against new articles
         from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
         confirm_logs = verify_and_confirm_torrents(session, qbit, s)
         logs.extend(confirm_logs)
-        # 5. Reconcile schedule rollover (+7d weekly heuristic)
         rollover_logs = sup.reconcile_schedule_rollover()
         logs.extend(rollover_logs)
 
@@ -744,7 +706,7 @@ async def sync_anilist_now(session: Session = Depends(get_db)):
 
 
 @router.post("/settings/clear-all")
-def clear_all_monitored_debug(session: Session = Depends(get_db), qbit: QBitClient = Depends(get_qbit)):
+def clear_all_monitored(session: Session = Depends(get_db), qbit: QBitClient = Depends(get_qbit)):
     shows = session.exec(select(Monitored)).all()
     count = len(shows)
     try:
@@ -771,9 +733,6 @@ def clear_all_monitored_debug(session: Session = Depends(get_db), qbit: QBitClie
     return {"status": "success", "message": f"Cleared all {count} shows."}
 
 
-# -------------------------------------------------------------
-# Supervision Cycle & Status Endpoints
-# -------------------------------------------------------------
 @router.post("/cycle/run")
 async def run_cycle_now(session: Session = Depends(get_db)):
     if state.is_running_cycle:
@@ -787,12 +746,10 @@ async def run_cycle_now(session: Session = Depends(get_db)):
     state.add_log("Manual supervision cycle initiated from WebUI.", "INFO")
     try:
         logs = await sup.run_full_cycle()
-        state.last_cycle_logs = logs
         state.last_cycle_time = datetime.now(timezone.utc)
         for l in logs:
             state.add_log(f"Supervisor: {l}", "INFO")
 
-        # Recalculate next timer
         default_interval = max(60, s.refresh_interval_minutes * 60)
         sleep_sec, reason = calculate_next_poll_interval(
             session,
@@ -802,7 +759,6 @@ async def run_cycle_now(session: Session = Depends(get_db)):
         now_utc = datetime.now(timezone.utc)
         state.next_check_seconds = sleep_sec
         state.next_check_reason = reason
-        state.next_check_time = now_utc
         state.target_next_check_time = now_utc + timedelta(seconds=sleep_sec)
 
         return {

@@ -4,7 +4,6 @@ APP_NAME = "qbit-seasonal-anime"
 CONFIG_DIR = Path.home() / ".config" / APP_NAME
 DB_PATH = CONFIG_DIR / "anime.db"
 
-# Default configuration values
 DEFAULT_QBIT_HOST = "http://localhost:8080"
 DEFAULT_QBIT_USERNAME = "admin"
 DEFAULT_QBIT_PASSWORD = "adminadmin"
@@ -14,5 +13,4 @@ DEFAULT_SEED_RATIO = 1.0
 DEFAULT_REFRESH_INTERVAL_MINUTES = 360
 DEFAULT_STALL_WAIT_HOURS = 24
 
-# Matching thresholds
 FUZZY_MATCH_THRESHOLD = 85.0

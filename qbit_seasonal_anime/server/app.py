@@ -24,7 +24,6 @@ async def background_supervisor_task():
     anilist = AniListClient()
     state.add_log("Background supervisor service initialized.", "INFO")
 
-    # Initial cycle on startup
     await asyncio.sleep(2)
     while True:
         try:
@@ -37,7 +36,6 @@ async def background_supervisor_task():
                 state.add_log("Executing background supervision check...", "INFO")
                 try:
                     logs = await supervisor.run_full_cycle()
-                    state.last_cycle_logs = logs
                     state.last_cycle_time = datetime.now(timezone.utc)
                     for l in logs:
                         state.add_log(f"Supervisor: {l}", "INFO")
@@ -59,11 +57,9 @@ async def background_supervisor_task():
                 now_utc = datetime.now(timezone.utc)
                 state.next_check_seconds = sleep_seconds
                 state.next_check_reason = reason
-                state.next_check_time = now_utc
                 state.target_next_check_time = now_utc + timedelta(seconds=sleep_seconds)
                 state.add_log(f"Next check: {reason} (Sleeping {sleep_seconds // 60}m)...", "INFO")
 
-            # Sleep or wait for wake_event (manual cycle trigger from WebUI)
             state.wake_event.clear()
             try:
                 await asyncio.wait_for(state.wake_event.wait(), timeout=sleep_seconds)
@@ -82,14 +78,11 @@ async def background_supervisor_task():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure DB schema & tables are initialized
     engine = get_engine()
     init_db(engine)
 
-    # Launch background supervisor task
     bg_task = asyncio.create_task(background_supervisor_task())
     yield
-    # Shutdown
     bg_task.cancel()
     try:
         await bg_task

@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import MagicMock
-from sqlmodel import Session, create_engine, SQLModel
+from sqlmodel import Session, create_engine, SQLModel, select
 from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
-from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings
+from qbit_seasonal_anime.db.models import Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
 
 class TestConfirmation(unittest.TestCase):
@@ -42,8 +42,6 @@ class TestConfirmation(unittest.TestCase):
         self.session.close()
 
     def test_confirmation_true_positive(self):
-        from qbit_seasonal_anime.db.models import MatchHistory, utc_now
-        from sqlmodel import select
         mock_qbit = MagicMock()
         mock_received_time = utc_now()
         mock_qbit.get_rule_match_time.return_value = mock_received_time
@@ -64,19 +62,14 @@ class TestConfirmation(unittest.TestCase):
         self.session.refresh(self.show)
         self.session.refresh(self.hist)
 
-        # Status should transition to FIXED
         self.assertEqual(self.show.status, MonitoredStatus.FIXED)
         self.assertEqual(self.show.last_confirmed_episode, 8)
         self.assertEqual(self.hist.outcome, RuleOutcome.CONFIRMED)
         self.assertTrue(any("Confirmed rule" in log for log in logs))
 
-        # MatchHistory should record the time it matched (received), NOT the 3-day-old article date
-        from qbit_seasonal_anime.db.models import MatchHistory, utc_now
-        from sqlmodel import select
         m_hist = self.session.exec(select(MatchHistory)).all()
         self.assertEqual(len(m_hist), 1)
         self.assertEqual(m_hist[0].release_title, "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv")
-        # Time difference from utc_now should be within seconds, not 3 days
         diff_sec = abs((utc_now().replace(tzinfo=None) - m_hist[0].created_at).total_seconds())
         self.assertLess(diff_sec, 10)
 
@@ -94,7 +87,6 @@ class TestConfirmation(unittest.TestCase):
         logs = verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
         self.session.refresh(self.show)
 
-        # Should remain UNCONFIRMED
         self.assertEqual(self.show.status, MonitoredStatus.UNCONFIRMED)
 
 

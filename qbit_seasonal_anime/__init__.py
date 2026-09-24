@@ -1,1 +1,0 @@
-# qbit-seasonal-anime

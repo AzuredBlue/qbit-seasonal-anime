@@ -1,6 +1,6 @@
 from collections import deque
 from datetime import datetime, timezone
-from typing import Deque, Dict, Any, List, Optional
+from typing import Deque, Dict, Any, Optional
 import asyncio
 
 class ServerState:
@@ -9,10 +9,8 @@ class ServerState:
         self.wake_event: asyncio.Event = asyncio.Event()
         self.is_running_cycle: bool = False
         self.last_cycle_time: Optional[datetime] = None
-        self.last_cycle_logs: List[str] = []
         self.next_check_reason: str = "Initializing supervisor..."
         self.next_check_seconds: int = 0
-        self.next_check_time: Optional[datetime] = None
         self.target_next_check_time: Optional[datetime] = None
 
     def add_log(self, message: str, level: str = "INFO"):

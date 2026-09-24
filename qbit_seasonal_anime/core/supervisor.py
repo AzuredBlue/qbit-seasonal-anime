@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import timezone, timedelta
 from typing import Any, Dict, List
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError, get_current_and_next_season
@@ -54,10 +54,8 @@ class Supervisor:
         removed = 0
         renamed = 0
 
-        # 1. Remove feeds from DB that were deleted from qBittorrent
         for url, f in list(existing_feeds_by_url.items()):
             if url not in qbit_urls:
-                # Unassign any shows currently pointing to this deleted feed
                 shows_on_feed = self.session.exec(
                     select(Monitored).where(Monitored.current_feed_id == f.id)
                 ).all()
@@ -67,7 +65,6 @@ class Supervisor:
                         show.status = MonitoredStatus.UNCONFIRMED
                     self.session.add(show)
 
-                # Nullify any history references
                 hist_on_feed = self.session.exec(
                     select(RuleHistory).where(RuleHistory.feed_id == f.id)
                 ).all()
@@ -80,7 +77,6 @@ class Supervisor:
                 removed += 1
                 logs.append(f"Removed deleted qBit RSS feed: '{f.qbit_feed_name}'")
 
-        # 2. Add newly discovered feeds or update names
         next_priority = len(existing_feeds_by_url) + 1
         for qf in qbit_feeds:
             url = qf["url"]
@@ -101,7 +97,6 @@ class Supervisor:
 
         self.session.flush()
 
-        # 3. Compact priorities so there are no gaps (e.g. 1, 2, 4 -> 1, 2, 3)
         remaining_feeds = list(existing_feeds_by_url.values())
         remaining_feeds.sort(key=lambda x: x.priority)
         for idx, feed_item in enumerate(remaining_feeds, start=1):
@@ -142,7 +137,6 @@ class Supervisor:
 
         top_feed = all_feeds[0]
 
-        # Query cached articles once for the entire batch of unassigned shows
         try:
             rss_tree = self.qbit.get_rss_items(with_data=True)
             cached_articles = flatten_rss_articles(rss_tree)
@@ -151,14 +145,12 @@ class Supervisor:
             cached_articles = {}
 
         for show in unassigned_shows:
-            # Check previously failed feeds for exclusion
             failed_stmt = select(RuleHistory.feed_id).where(
                 RuleHistory.monitored_id == show.id,
                 RuleHistory.outcome.in_([RuleOutcome.STALLED, RuleOutcome.FALSE_POSITIVE, RuleOutcome.REPLACED]),
             )
             excluded = [fid for fid in self.session.exec(failed_stmt).all() if fid is not None]
 
-            # 1. First, check if any feed already has matching articles in cache
             res = discover_feed_for_show(
                 monitored=show,
                 feeds=all_feeds,
@@ -203,9 +195,6 @@ class Supervisor:
                     err_msg = f"Failed creating rule for '{show.display_name}': {e}"
                     logger.error(err_msg)
             else:
-                # 2. PROACTIVE SPECULATIVE RULE ON PRIORITY #1 FEED
-                # If no feed has cached releases yet (e.g. upcoming show or unreleased premiere),
-                # proactively arm a rule with broad multi-alias regex on the user's #1 Priority Feed
                 target_feed = top_feed
                 if top_feed.id in excluded:
                     avail = [f for f in all_feeds if f.id not in excluded]
@@ -302,14 +291,12 @@ class Supervisor:
                     show.season_year = data.get("season_year")
                     updated = True
 
-                # Merge any new aliases
                 current_aliases = set(show.aliases)
                 for a in data.get("aliases", []):
                     if a and a.strip():
                         current_aliases.add(a.strip())
                 show.aliases = list(current_aliases)
 
-                # Check if AniList indicates show has finished broadcast
                 is_finished = (data.get("status") == "FINISHED")
                 if is_finished and data.get("next_airing_episode") is None:
                     if has_downloaded_final_episode(self.session, show):
@@ -328,8 +315,6 @@ class Supervisor:
                             logger.info(msg)
                             logs.append(msg)
                     else:
-                        # Broadcast finished, but finale not yet downloaded:
-                        # Retain final episode number so the system knows we are awaiting the finale
                         final_ep = show.total_episodes or show.next_airing_episode
                         if final_ep and show.next_airing_episode != final_ep:
                             show.next_airing_episode = final_ep
@@ -345,7 +330,6 @@ class Supervisor:
                 if updated:
                     self.session.add(show)
             else:
-                # Automatically import newly added seasonal anime
                 from qbit_seasonal_anime.core.rules import sanitize_folder_name
                 new_show = Monitored(
                     anilist_id=aid,
@@ -410,7 +394,6 @@ class Supervisor:
             )
 
             current_def = existing_rules.get(rule_name)
-            # Skip updating if rule already exists with identical configuration
             if current_def and _rules_are_equivalent(current_def, desired_def):
                 continue
 
@@ -447,14 +430,11 @@ class Supervisor:
             if air_at.tzinfo is None:
                 air_at = air_at.replace(tzinfo=timezone.utc)
 
-            # Only evaluate shows whose scheduled air time has already passed
             if air_at > now:
                 continue
 
             current_ep = show.next_airing_episode or 1
 
-            # Finale check: If total_episodes is known and current_ep has reached/exceeded total_episodes,
-            # the finale has already aired on TV. Do not advance past total_episodes.
             if show.total_episodes and current_ep >= show.total_episodes:
                 if has_downloaded_final_episode(self.session, show):
                     show.next_airing_episode = None
@@ -468,9 +448,6 @@ class Supervisor:
                     logs.append(msg)
                 continue
 
-            # Determine if rollover should trigger:
-            # 1. Show has a confirmed release (last_confirmed_episode is set), OR
-            # 2. Episode aired >24 hours ago without AniList updating
             has_confirmed_release = bool(show.last_confirmed_episode and show.last_confirmed_episode > 0)
             is_overdue_24h = air_at <= (now - timedelta(hours=24))
 
@@ -481,7 +458,6 @@ class Supervisor:
                     new_air += timedelta(days=7)
                     new_ep += 1
 
-                # Cap at total_episodes if total_episodes is known
                 if show.total_episodes and new_ep >= show.total_episodes:
                     new_ep = show.total_episodes
 
@@ -513,17 +489,13 @@ class Supervisor:
         all_shows = self.session.exec(select(Monitored)).all()
 
         for show in all_shows:
-            # Only evaluate shows with a known season
             if not show.season_year or not show.season_name:
                 continue
 
             show_season_idx = show.season_year * 10 + season_order.get(show.season_name.upper(), 0)
             if show_season_idx >= cur_season_idx:
-                # Show is from current or upcoming season -> keep
                 continue
 
-            # Show started in a past season. Determine if it is an extending cour:
-            # Extending cours are still airing (not completed, has upcoming air date, or pending episodes)
             air_at = show.next_airing_at
             if air_at and air_at.tzinfo is None:
                 air_at = air_at.replace(tzinfo=timezone.utc)
@@ -538,10 +510,8 @@ class Supervisor:
             )
 
             if is_extending_cour:
-                # Preserve continuing cour
                 continue
 
-            # Completed or finished show from a past season -> prune
             if show.qbit_rule_name:
                 try:
                     delete_rule(self.qbit, show.qbit_rule_name)
@@ -549,7 +519,6 @@ class Supervisor:
                     logger.debug(f"Could not delete rule '{show.qbit_rule_name}' during seasonal prune: {e}")
                 show.qbit_rule_name = None
 
-            # Delete related RuleHistory
             hist = self.session.exec(select(RuleHistory).where(RuleHistory.monitored_id == show.id)).all()
             for h in hist:
                 self.session.delete(h)
@@ -568,31 +537,22 @@ class Supervisor:
         """Execute one complete supervision iteration."""
         all_logs: List[str] = []
 
-        # 1. Sync RSS feeds from qBittorrent
         all_logs.extend(await asyncio.to_thread(self.sync_feeds))
 
-        # 2. Sync schedule and discover newly added seasonal anime from AniList FIRST
         all_logs.extend(await self.sync_anilist_schedule())
 
-        # 3. Prune finished shows from past seasons (extending cours are preserved)
         all_logs.extend(await asyncio.to_thread(self.prune_past_season_shows))
 
-        # 4. Bootstrap any new/unassigned shows
         all_logs.extend(await asyncio.to_thread(self.bootstrap_unassigned_shows))
 
-        # 5. Confirmation loop for active downloads and RSS releases
         all_logs.extend(await asyncio.to_thread(verify_and_confirm_torrents, self.session, self.qbit, self.settings))
 
-        # 6. Reconcile schedule rollover (+7d weekly heuristic)
         all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
 
-        # 7. Refresh & synchronize active rules in qBittorrent
         all_logs.extend(await asyncio.to_thread(self.sync_active_rules))
 
-        # 8. Check for stalled releases & trigger fallback / finished show completion
         all_logs.extend(await asyncio.to_thread(check_and_handle_stalls, self.session, self.qbit, self.settings))
 
-        # 7. Summary breakdown
         total_shows = self.session.exec(select(Monitored)).all()
         now = utc_now()
         works_cnt = sum(1 for s in total_shows if s.status == MonitoredStatus.FIXED)
@@ -605,7 +565,6 @@ class Supervisor:
             if s.status == MonitoredStatus.UNCONFIRMED:
                 air_at = s.next_airing_at
                 if air_at and air_at.tzinfo is None:
-                    from datetime import timezone
                     air_at = air_at.replace(tzinfo=timezone.utc)
                 is_unreleased = (
                     (s.next_airing_episode == 1 or s.next_airing_episode is None)

@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -31,7 +31,6 @@ def get_engine(db_path: Optional[Path] = None):
 
     if _engine is None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        # Ensure config directory has safe permissions
         try:
             os.chmod(CONFIG_DIR, 0o700)
         except OSError:
@@ -39,7 +38,6 @@ def get_engine(db_path: Optional[Path] = None):
 
         _engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
 
-        # Ensure sqlite DB file has 0600 permissions
         if DB_PATH.exists():
             try:
                 os.chmod(DB_PATH, 0o600)
@@ -84,7 +82,6 @@ def init_db(engine=None):
             session.exec(text("ALTER TABLE match_history ADD COLUMN matched_regex VARCHAR"))
             session.commit()
 
-        # Seed default settings if empty
         stmt = select(Settings)
         settings = session.exec(stmt).first()
         if not settings:

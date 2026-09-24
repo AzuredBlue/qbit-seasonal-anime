@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 import pytest
 from unittest.mock import AsyncMock, patch
 from qbit_seasonal_anime.clients.anilist import AniListClient, get_current_and_next_season
-from tests.fixtures import MOCK_ANILIST_SEASONAL_RESPONSE
 
 
 def test_season_calculation():
@@ -21,7 +20,6 @@ def test_season_calculation():
 async def test_fetch_user_seasonal_anime_filtering():
     client = AniListClient()
 
-    # Response with 1 releasing, 1 planned next season, and 1 old finished show
     payload = {
         "MediaListCollection": {
             "lists": [
@@ -76,8 +74,6 @@ async def test_fetch_user_seasonal_anime_filtering():
         mock_post.return_value = payload
 
         shows = await client.fetch_user_seasonal_anime("TestUser")
-        # Should only include show 1 (currently releasing) and show 2 (upcoming next season),
-        # strictly filtering out show 3 (finished) and show 4 (future season beyond next season)!
         assert len(shows) == 2
         assert {s["anilist_id"] for s in shows} == {1, 2}
 
@@ -135,13 +131,7 @@ async def test_fetch_user_seasonal_anime_includes_current_season_finished_and_mo
          patch("qbit_seasonal_anime.clients.anilist.get_current_and_next_season", return_value=(("SUMMER", 2026), ("FALL", 2026))):
         mock_post.return_value = payload
 
-        # Monitored IDs has 20 (extending cour), but not 30
         shows = await client.fetch_user_seasonal_anime("TestUser", monitored_anilist_ids={20})
-        # Should include:
-        # - Show 10: Current season finished (SUMMER 2026)
-        # - Show 20: Tracked monitored extending cour finished (SPRING 2026)
-        # Should exclude:
-        # - Show 30: Unmonitored old spring backlog
         assert len(shows) == 2
         assert {s["anilist_id"] for s in shows} == {10, 20}
 

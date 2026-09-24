@@ -1,14 +1,9 @@
 import sys
 import uvicorn
-from qbit_seasonal_anime.db.session import init_db
 
 
 def main():
-    # Initialize SQLite database schema
-    init_db()
-
     port = 8085
-    # Allow optional simple port override (e.g. qbit-seasonal-anime --port 8085 or qbit-seasonal-anime 8085)
     for i, arg in enumerate(sys.argv[1:]):
         if arg in ("-p", "--port") and i + 1 < len(sys.argv) - 1:
             try:

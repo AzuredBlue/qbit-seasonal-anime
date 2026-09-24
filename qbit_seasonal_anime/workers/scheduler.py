@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import signal
-from datetime import timezone
+from datetime import timedelta, timezone
 from typing import Optional, Tuple
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.anilist import AniListClient
@@ -33,7 +33,6 @@ def calculate_next_poll_interval(
     if not shows:
         return default_interval_seconds, "No monitored shows. Sleeping default interval."
 
-    # Determine dynamic hunting interval based on qBittorrent RSS refresh rate (+15s)
     effective_hunting_interval = hunting_interval_seconds
     if effective_hunting_interval is None:
         if qbit_client:
@@ -45,7 +44,6 @@ def calculate_next_poll_interval(
     unresolved_upcoming = []
 
     for s in shows:
-        # Ignore completed, paused, and already WORKING shows (qBittorrent handles working rules automatically)
         if s.status in (MonitoredStatus.PAUSED, MonitoredStatus.COMPLETED, MonitoredStatus.FIXED):
             continue
 
@@ -53,12 +51,9 @@ def calculate_next_poll_interval(
         if airing_at and airing_at.tzinfo is None:
             airing_at = airing_at.replace(tzinfo=timezone.utc)
 
-        # Only evaluate shows that have an established air date
         if airing_at is None:
-            # Announced/upcoming show without an air date yet (e.g. Ao Ashi S2) -> do not hunt
             continue
 
-        # Show does not have a confirmed working rule yet
         if s.current_feed_id is None or s.status == MonitoredStatus.STALLED:
             if airing_at <= now:
                 hunting_shows.append(s)
@@ -67,8 +62,6 @@ def calculate_next_poll_interval(
         elif s.status == MonitoredStatus.UNCONFIRMED:
             is_near = (airing_at <= now)
             if not is_near and (s.next_airing_episode or 1) > 1:
-                # If an episode aired in the last 24 hours and hasn't been confirmed yet, stay in hunting mode
-                from datetime import timedelta
                 previous_air = airing_at - timedelta(days=7)
                 expected_ep = (s.next_airing_episode or 1) - 1
                 if (now - previous_air) <= timedelta(hours=24) and (s.last_confirmed_episode or 0) < expected_ep:
@@ -79,7 +72,6 @@ def calculate_next_poll_interval(
             else:
                 unresolved_upcoming.append((airing_at, s))
 
-    # 1. If actively hunting for a release that just aired on TV to create/verify rule
     if hunting_shows:
         names = ", ".join(f"'{s.display_name}'" for s in hunting_shows[:3])
         if len(hunting_shows) > 3:
@@ -89,7 +81,6 @@ def calculate_next_poll_interval(
         interval_str = f"{h_mins}m {h_secs}s" if h_secs else f"{h_mins}m"
         return effective_hunting_interval, f"Hunting mode: {len(hunting_shows)} show(s) waiting for rule/release ({names}). Checking every {interval_str}."
 
-    # 2. If an unassigned/upcoming show premieres sooner than default interval -> wake on air time to bind rule
     if unresolved_upcoming:
         unresolved_upcoming.sort(key=lambda x: x[0])
         earliest_air, earliest_show = unresolved_upcoming[0]

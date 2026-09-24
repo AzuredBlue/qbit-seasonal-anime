@@ -17,7 +17,6 @@ def db_engine():
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as s:
-        # Seed default settings
         settings = Settings(id=1, qbit_host="http://localhost:8080", default_category="Anime")
         s.add(settings)
         s.commit()
@@ -34,7 +33,7 @@ def session(db_engine):
 def mock_qbit():
     q = MagicMock()
     q.get_rss_rules.return_value = {}
-    q.delete_rss_rule.return_value = True
+    q.remove_rss_rule.return_value = True
     return q
 
 
@@ -127,7 +126,6 @@ def test_feeds_and_reorder(client, session):
     feeds = res.json()
     assert len(feeds) >= 2
 
-    # Swap priorities
     reorder_res = client.post("/api/feeds/reorder", json={
         "feeds": [
             {"id": f1.id, "priority": 2},
@@ -157,7 +155,6 @@ def test_settings_endpoints(client, session):
     })
     assert update_res.status_code == 200
 
-    # Verify updated in DB
     session.expire_all()
     s = session.exec(select(Settings)).first()
     assert s.qbit_host == "http://192.168.1.50:8080"
@@ -206,7 +203,6 @@ def test_edit_show_endpoint(client, session, mock_qbit):
     session.commit()
     session.refresh(show)
 
-    # Edit show: assign feed 1 and custom save folder
     res = client.post(f"/api/shows/{show.id}/edit", json={
         "current_feed_id": feed.id,
         "save_folder": "Bleach Custom",
@@ -232,23 +228,19 @@ def test_title_language_setting_switch(client, session):
     session.add(show)
     session.commit()
 
-    # 1. Default (English)
     res = client.get("/api/shows")
     assert res.status_code == 200
     s_default = next(s for s in res.json() if s["anilist_id"] == 5001)
     assert s_default["display_name"] == "The Apothecary Diaries"
 
-    # 2. Update setting to Romaji / JA
     up_res = client.post("/api/settings", json={"title_language": "romaji"})
     assert up_res.status_code == 200
 
-    # 3. Check shows in Romaji
     res_ro = client.get("/api/shows")
     assert res_ro.status_code == 200
     s_ro = next(s for s in res_ro.json() if s["anilist_id"] == 5001)
     assert s_ro["display_name"] == "Kusuriya no Hitorigoto"
 
-    # 4. Switch back to English
     client.post("/api/settings", json={"title_language": "english"})
     res_en = client.get("/api/shows")
     s_en = next(s for s in res_en.json() if s["anilist_id"] == 5001)
@@ -299,7 +291,6 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     assert updated_show.last_confirmed_episode == 22
     assert updated_show.matched_release_group == "SubsPlease"
 
-    # Also verify that MatchHistory was created for this auto-confirmed match with reception timestamp
     hist_res = client.get("/api/history")
     assert hist_res.status_code == 200
     hist_data = hist_res.json()
@@ -313,7 +304,6 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     now_dt = datetime.now(timezone.utc)
     assert abs((now_dt - created_dt).total_seconds()) < 10
 
-    # Test clear history
     del_res = client.delete("/api/history")
     assert del_res.status_code == 200
     hist_after = client.get("/api/history").json()

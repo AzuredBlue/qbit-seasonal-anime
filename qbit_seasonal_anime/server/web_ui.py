@@ -2,30 +2,12 @@ from fastapi.responses import HTMLResponse
 
 def get_web_ui_html() -> HTMLResponse:
     html = """<!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>qbit-seasonal-anime</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            sonarr: {
-              body: '#121215',
-              sidebar: '#18181c',
-              card: '#1e1e24',
-              border: '#2a2a32',
-              borderLight: '#383844',
-            }
-          }
-        }
-      }
-    }
-  </script>
   <style>
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #121215; }
@@ -42,12 +24,8 @@ def get_web_ui_html() -> HTMLResponse:
 </head>
 <body class="bg-[#121215] text-zinc-100 flex h-screen overflow-hidden font-sans antialiased selection:bg-zinc-700 selection:text-white">
 
-  <!-- ============================================================ -->
-  <!-- SIDEBAR -->
-  <!-- ============================================================ -->
   <aside class="w-60 bg-[#18181c] border-r border-[#26262e] flex flex-col flex-shrink-0 select-none z-20">
     
-    <!-- Navigation Order: Shows -> RSS Feeds -> Settings -->
     <nav class="flex-1 px-3 py-5 space-y-1.5 overflow-y-auto">
       <button onclick="switchTab('shows')" id="nav-shows" class="nav-item w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors bg-[#262630] text-white">
         <svg class="w-5 h-5 text-zinc-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/></svg>
@@ -84,7 +62,6 @@ def get_web_ui_html() -> HTMLResponse:
       </button>
     </nav>
 
-    <!-- Bottom Controls -->
     <div class="p-3.5 border-t border-[#26262e] space-y-2.5 text-xs">
       <div class="space-y-0.5">
         <div class="text-[10px] text-zinc-500 uppercase tracking-wider font-semibold">Next Check</div>
@@ -98,12 +75,8 @@ def get_web_ui_html() -> HTMLResponse:
     </div>
   </aside>
 
-  <!-- ============================================================ -->
-  <!-- MAIN WORKSPACE -->
-  <!-- ============================================================ -->
   <main class="flex-1 flex flex-col min-w-0 bg-[#121215] overflow-hidden">
     
-    <!-- Top Summary Strip -->
     <header class="h-11 border-b border-[#222228] px-6 flex items-center justify-between flex-shrink-0 bg-[#16161a]">
       <div class="flex items-center gap-3 text-xs font-mono">
         <span id="stat-working" class="text-emerald-400 font-medium">0 Working</span>
@@ -113,20 +86,12 @@ def get_web_ui_html() -> HTMLResponse:
         <span id="stat-stalled" class="text-rose-400 font-medium">0 Stalled</span>
       </div>
 
-      <div class="flex items-center gap-3">
-        <span id="last-updated-text" class="text-[11px] text-zinc-500 font-mono"></span>
-      </div>
     </header>
 
-    <!-- Scrollable Workspace -->
     <div class="flex-1 overflow-y-auto p-6" id="main-scroll-container">
 
-      <!-- ============================================================ -->
-      <!-- TAB 1: SHOWS -->
-      <!-- ============================================================ -->
       <section id="tab-shows" class="space-y-8 max-w-[1900px]">
         
-        <!-- SECTION 1: RELEASING -->
         <div id="section-releasing" class="space-y-3">
           <div class="flex items-center justify-between border-b border-[#222228] pb-1.5">
             <div class="flex items-center gap-2">
@@ -134,7 +99,6 @@ def get_web_ui_html() -> HTMLResponse:
               <span id="header-count-releasing" class="text-xs text-zinc-500 font-mono">(0)</span>
             </div>
 
-            <!-- Sleek Segmented Sort Control -->
             <div class="flex items-center gap-1 bg-[#121215] p-0.5 rounded border border-[#26262e] text-[11px] font-mono">
               <button onclick="setSortMode('airing')" id="sort-btn-airing" class="px-2 py-0.5 rounded flex items-center gap-1.5 transition-all text-zinc-400 hover:text-zinc-200" title="Sort by Next Episode Airing (Soonest first)">
                 <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -150,32 +114,23 @@ def get_web_ui_html() -> HTMLResponse:
               </button>
             </div>
           </div>
-          <!-- Enlarged card grid with smooth hover transition -->
           <div id="grid-releasing" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
-            <!-- Cards rendered by JS -->
           </div>
         </div>
 
-        <!-- SECTION 2: PLANNED -->
         <div id="section-planned" class="space-y-3 pt-2">
           <div class="flex items-center gap-2 border-b border-[#222228] pb-1.5">
             <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Planned</h2>
             <span id="header-count-planned" class="text-xs text-zinc-500 font-mono">(0)</span>
           </div>
-          <!-- Enlarged card grid with smooth hover transition -->
           <div id="grid-planned" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
-            <!-- Cards rendered by JS -->
           </div>
         </div>
 
       </section>
 
-      <!-- ============================================================ -->
-      <!-- TAB 2: CALENDAR (Weekly Schedule) -->
-      <!-- ============================================================ -->
       <section id="tab-calendar" class="space-y-4 max-w-[1950px] hidden">
         
-        <!-- Header Bar -->
         <div class="flex items-center justify-between border-b border-[#222228] pb-3">
           <div>
             <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-200">Weekly Calendar</h2>
@@ -183,9 +138,7 @@ def get_web_ui_html() -> HTMLResponse:
           </div>
         </div>
 
-        <!-- 7-Day Grid / Timeline -->
         <div id="calendar-weekly-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 gap-6 items-start select-none">
-          <!-- Rendered by JS -->
         </div>
 
       </section>
@@ -211,9 +164,6 @@ def get_web_ui_html() -> HTMLResponse:
         <div id="history-container" class="space-y-2.5"></div>
       </section>
 
-      <!-- ============================================================ -->
-      <!-- TAB 3: RSS FEEDS (Left-aligned & Larger) -->
-      <!-- ============================================================ -->
       <section id="tab-feeds" class="hidden max-w-5xl space-y-5">
         <div class="flex items-center justify-between border-b border-[#222228] pb-3">
           <div>
@@ -235,15 +185,11 @@ def get_web_ui_html() -> HTMLResponse:
               </tr>
             </thead>
             <tbody id="feeds-table-body" class="divide-y divide-[#222228]">
-              <!-- Rendered by JS -->
             </tbody>
           </table>
         </div>
       </section>
 
-      <!-- ============================================================ -->
-      <!-- TAB 3: SETTINGS (Left-aligned & Larger) -->
-      <!-- ============================================================ -->
       <section id="tab-settings" class="hidden max-w-4xl space-y-6">
         <div class="border-b border-[#222228] pb-3">
           <h2 class="text-sm font-bold uppercase tracking-wider text-zinc-200">Settings</h2>
@@ -252,7 +198,6 @@ def get_web_ui_html() -> HTMLResponse:
 
         <form id="settings-form" onsubmit="saveSettings(event)" class="space-y-5">
           
-          <!-- qBittorrent -->
           <div class="bg-[#18181c] border border-[#26262e] rounded-xl p-5 space-y-4 shadow-sm">
             <h3 class="text-xs font-bold text-zinc-200 uppercase tracking-wide">qBittorrent Connection</h3>
 
@@ -279,7 +224,6 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          <!-- Paths & Rule Defaults -->
           <div class="bg-[#18181c] border border-[#26262e] rounded-xl p-5 space-y-4 shadow-sm">
             <h3 class="text-xs font-bold text-zinc-200 uppercase tracking-wide">Paths & Rule Defaults</h3>
 
@@ -304,7 +248,6 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          <!-- AniList -->
           <div class="bg-[#18181c] border border-[#26262e] rounded-xl p-5 space-y-4 shadow-sm">
             <h3 class="text-xs font-bold text-zinc-200 uppercase tracking-wide">AniList Account & Scheduler</h3>
 
@@ -325,7 +268,6 @@ def get_web_ui_html() -> HTMLResponse:
                   Sync AniList Shows
                 </button>
 
-                <!-- Minimal Anime Names Switch (EN | JA) -->
                 <div class="flex items-center gap-2.5 flex-shrink-0">
                   <span class="text-xs text-zinc-300 font-medium">Anime Names</span>
                   <div class="inline-flex items-center bg-[#121215] border border-[#30303a] rounded-lg p-0.5 text-xs font-mono select-none">
@@ -340,7 +282,6 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          <!-- Save Button & Reset -->
           <div class="flex items-center justify-between pt-2">
             <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white text-xs sm:text-sm font-semibold py-2.5 px-6 rounded-lg transition-colors shadow-md">
               Save Settings
@@ -353,9 +294,6 @@ def get_web_ui_html() -> HTMLResponse:
         </form>
       </section>
 
-      <!-- ============================================================ -->
-      <!-- TAB 4: LOGS -->
-      <!-- ============================================================ -->
       <section id="tab-logs" class="space-y-4 max-w-6xl hidden">
         <div class="flex items-center justify-between">
           <div>
@@ -397,11 +335,6 @@ def get_web_ui_html() -> HTMLResponse:
     </div>
   </main>
 
-  <!-- ============================================================ -->
-  <!-- ============================================================ -->
-  <!-- ============================================================ -->
-  <!-- SHOW DETAILS & EDIT MODAL (Click on Card) -->
-  <!-- ============================================================ -->
   <div id="rule-modal" onclick="if (event.target === this) closeRuleModal()" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-3 sm:p-6">
     <div class="bg-[#18181c] border border-[#2e2e38] rounded-2xl max-w-3xl w-full p-5 sm:p-6 space-y-3.5 shadow-2xl overflow-y-auto max-h-[92vh]">
       <div class="flex items-center justify-between border-b border-[#26262e] pb-2.5">
@@ -413,7 +346,6 @@ def get_web_ui_html() -> HTMLResponse:
       </div>
 
       <div id="rule-modal-content" class="space-y-3 text-sm">
-        <!-- Injected by JS -->
       </div>
 
       <div class="flex items-center justify-between pt-3 border-t border-[#26262e]">
@@ -433,10 +365,8 @@ def get_web_ui_html() -> HTMLResponse:
     </div>
   </div>
 
-  <!-- Notification Toast -->
   <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-xs"></div>
 
-  <!-- JavaScript Logic -->
   <script>
     let allShows = [];
     let allFeeds = [];
@@ -445,7 +375,6 @@ def get_web_ui_html() -> HTMLResponse:
     let currentInspectedShowId = null;
     let modalInitialState = null;
 
-    // High contrast, solid color tags for maximum legibility on any image
     const STATUS_CONFIG = {
       'FIXED': { label: 'Working', bg: 'bg-[#064e3b] text-[#34d399] border-[#059669]' },
       'UNCONFIRMED': { label: 'Testing', bg: 'bg-[#713f12] text-[#facc15] border-[#a16207]' },
@@ -575,7 +504,6 @@ def get_web_ui_html() -> HTMLResponse:
         const aCompleted = isCompleted(a);
         const bCompleted = isCompleted(b);
 
-        // Completed shows are always placed last in the ordering
         if (aCompleted && !bCompleted) return 1;
         if (!aCompleted && bCompleted) return -1;
 
@@ -587,18 +515,15 @@ def get_web_ui_html() -> HTMLResponse:
           const aUpcoming = aTime > now && aTime !== Infinity;
           const bUpcoming = bTime > now && bTime !== Infinity;
 
-          // 1. Upcoming shows first (soonest air date first)
           if (aUpcoming && !bUpcoming) return -1;
           if (!aUpcoming && bUpcoming) return 1;
 
-          // 2. Both upcoming, or both non-upcoming (Aired finite timestamps sort before Infinity)
           if (aTime !== bTime) return aTime - bTime;
 
           return (a.display_name || '').localeCompare(b.display_name || '');
         } else if (currentSortMode === 'title') {
           return (a.display_name || '').localeCompare(b.display_name || '');
         } else {
-          // default / id order
           return (a.id || 0) - (b.id || 0);
         }
       });
@@ -689,13 +614,11 @@ def get_web_ui_html() -> HTMLResponse:
 
       const feedName = show.current_feed_name || '[None]';
 
-      // Grayscale and dimming for paused and completed shows
       const isDimmed = isPaused || isCompleted;
       const posterImg = show.cover_image 
         ? `<img src="${show.cover_image}" alt="${show.display_name}" class="w-full h-full object-cover transition-all duration-200 ${isDimmed ? 'opacity-80 grayscale-[35%]' : ''}" loading="lazy" onerror="this.onerror=null;this.src='https://via.placeholder.com/260x360/1a1a20/4a4a58?text=Poster'">`
         : `<div class="w-full h-full flex items-center justify-center bg-[#18181c] text-zinc-600 text-xs font-mono ${isDimmed ? 'opacity-80 grayscale-[35%]' : ''}">No Art</div>`;
 
-      // Pause button color and icon (Amber when active to pause, Emerald when paused to resume)
       const pauseBtnBg = isPaused 
         ? 'bg-emerald-600 hover:bg-emerald-500 text-white' 
         : 'bg-amber-600 hover:bg-amber-500 text-white';
@@ -707,21 +630,17 @@ def get_web_ui_html() -> HTMLResponse:
       return `
         <div onclick="viewShowRule(${show.id})" class="bg-[#18181c] border ${isDimmed ? 'border-zinc-800' : 'border-[#26262e]'} hover:border-[#444452] hover:-translate-y-1 hover:shadow-lg hover:shadow-black/50 rounded flex flex-col overflow-hidden group cursor-pointer transition-all duration-200 ease-out">
           
-          <!-- Poster Container with hover overlay buttons -->
           <div class="relative w-full aspect-[2/3] bg-[#121215] overflow-hidden">
             ${posterImg}
 
-            <!-- Solid High-Contrast Badge at Top-Left of Image -->
             <div class="absolute top-2 left-2 z-10">
               <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold border shadow-md tracking-wide ${cfg.bg}">
                 ${label}
               </span>
             </div>
 
-            <!-- Floating Action Buttons (Visible ONLY on hover) -->
             <div class="absolute bottom-2 inset-x-2 flex items-center justify-between z-20 opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none">
               
-              <!-- Left: Pause/Play with colored background (hidden for completed shows) -->
               <div class="flex items-center gap-1.5 pointer-events-auto">
                 ${!isCompleted ? `
                 <button onclick="event.stopPropagation(); togglePauseShow(${show.id})" class="w-7 h-7 rounded flex items-center justify-center ${pauseBtnBg} shadow-md transition-transform active:scale-90" title="${isPaused ? 'Resume monitoring' : 'Pause monitoring'}">
@@ -730,7 +649,6 @@ def get_web_ui_html() -> HTMLResponse:
                 ` : ''}
               </div>
 
-              <!-- Right: Delete Button with red background -->
               <div class="pointer-events-auto">
                 <button onclick="event.stopPropagation(); deleteShow(${show.id}, '${show.display_name.replace(/'/g, "\\'")}')" class="w-7 h-7 rounded flex items-center justify-center bg-red-600 hover:bg-red-500 text-white shadow-md transition-transform active:scale-90" title="Delete show from monitoring">
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
@@ -739,7 +657,6 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          <!-- Clean, Perfectly Uniform Text Area Underneath -->
           <div class="p-2.5 flex flex-col justify-between bg-[#18181c] min-h-[5.5rem]">
             <h3 class="text-[13px] font-semibold text-zinc-100 leading-[1.4] line-clamp-2 min-h-[2.55rem] overflow-hidden pb-[1px]" title="${show.display_name}">
               ${show.display_name}
@@ -755,9 +672,6 @@ def get_web_ui_html() -> HTMLResponse:
       `;
     }
 
-    // ============================================================
-    // CALENDAR TAB LOGIC
-    // ============================================================
     function formatTime12(date) {
       if (!date) return '';
       let h = date.getHours();
@@ -771,14 +685,12 @@ def get_web_ui_html() -> HTMLResponse:
 
     function renderCalendar() {
       const now = new Date();
-      const currentDayOfWeek = (now.getDay() + 6) % 7; // 0 = Mon, 1 = Tue, ..., 6 = Sun
+      const currentDayOfWeek = (now.getDay() + 6) % 7;
       const nowMinutes = now.getHours() * 60 + now.getMinutes();
 
-      // Monday of the current week (midnight)
       const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
       monday.setDate(monday.getDate() - currentDayOfWeek);
 
-      // Sunday of the current week (end of day)
       const sunday = new Date(monday);
       sunday.setDate(monday.getDate() + 6);
       sunday.setHours(23, 59, 59, 999);
@@ -796,7 +708,6 @@ def get_web_ui_html() -> HTMLResponse:
       let totalCalendarShows = 0;
       let gridHtml = '';
 
-      // Build 7 Days starting Monday to Sunday
       for (let d = 0; d < 7; d++) {
         const colDate = new Date(monday);
         colDate.setDate(monday.getDate() + d);
@@ -814,8 +725,6 @@ def get_web_ui_html() -> HTMLResponse:
           const baseAirDate = new Date(show.next_airing_at);
           if (isNaN(baseAirDate.getTime())) return;
 
-          // If currently releasing: repeat on its weekly broadcast day
-          // If not released yet (upcoming): only show if it premieres within this 7-day window on this specific date
           if (show.is_released) {
             if (baseAirDate.getDay() === dayOfWeek) {
               const showInstanceDate = new Date(colDate);
@@ -836,7 +745,6 @@ def get_web_ui_html() -> HTMLResponse:
               });
             }
           } else {
-            // Only show upcoming anime if it airs on this exact date within this week
             if (baseAirDate >= monday && baseAirDate <= sunday && baseAirDate.toDateString() === colDate.toDateString()) {
               const timeMinutes = baseAirDate.getHours() * 60 + baseAirDate.getMinutes();
               const hasPassed = isPastDay || (isToday && (timeMinutes <= nowMinutes));
@@ -857,10 +765,8 @@ def get_web_ui_html() -> HTMLResponse:
 
         totalCalendarShows += colShows.length;
 
-        // Sort chronologically by air time
         colShows.sort((a, b) => a.timeMinutes - b.timeMinutes);
 
-        // Header without enclosing box or TODAY tag
         const headerHtml = `
           <div class="pb-2 mb-2 border-b ${isPastDay ? 'border-[#22222a]' : 'border-[#26262e]'}">
             <div class="flex items-baseline gap-1.5 ${isPastDay ? 'opacity-80' : 'opacity-100'}">
@@ -887,8 +793,7 @@ def get_web_ui_html() -> HTMLResponse:
             itemsHtml = `<div class="py-6 text-zinc-600 text-xs font-mono select-none">No releases</div>`;
           }
         } else {
-          // Group shows by air time (timeMinutes)
-          const timeSlots = [];
+        const timeSlots = [];
           colShows.forEach(item => {
             const lastSlot = timeSlots[timeSlots.length - 1];
             if (lastSlot && lastSlot.timeMinutes === item.timeMinutes) {
@@ -906,7 +811,6 @@ def get_web_ui_html() -> HTMLResponse:
           let renderedLine = false;
 
           timeSlots.forEach((slot) => {
-            // If today, render the indicator line at the current time position
             if (isToday && !renderedLine && !slot.hasPassed) {
               itemsHtml += `
                 <div class="relative py-1 my-1.5 -ml-3 flex items-center gap-1 z-20 select-none">
@@ -942,7 +846,6 @@ def get_web_ui_html() -> HTMLResponse:
 
       gridContainer.innerHTML = gridHtml;
 
-      // Update sidebar badge
       const badgeEl = document.getElementById('badge-calendar-shows');
       if (badgeEl) {
         badgeEl.textContent = totalCalendarShows;
@@ -952,7 +855,6 @@ def get_web_ui_html() -> HTMLResponse:
     function createTimeSlotHtml(slot, isToday) {
       const isMulti = slot.items.length > 1;
 
-      // Determine dot color from the most active show in slot
       let dotColor = 'bg-sky-400';
       const hasFixed = slot.items.some(i => (i.show.status || '').toUpperCase() === 'FIXED');
       const hasUnconf = slot.items.some(i => (i.show.status || '').toUpperCase() === 'UNCONFIRMED');
@@ -1000,7 +902,6 @@ def get_web_ui_html() -> HTMLResponse:
 
         return `
           <div class="relative group select-none">
-            <!-- Timeline Header Line (Dot + Air Time + Episode) -->
             <div class="flex items-center justify-between gap-1.5 mb-1.5">
               <div class="flex items-center gap-1.5">
                 <span class="w-3 h-3 rounded-full ${dotColor} absolute -left-[15px] z-10"></span>
@@ -1009,7 +910,6 @@ def get_web_ui_html() -> HTMLResponse:
               <span class="text-xs font-mono font-semibold ${isPaused ? 'text-zinc-500' : (hasPassed ? 'text-zinc-500' : 'text-zinc-400')}">${epText}</span>
             </div>
 
-            <!-- Anime Link to AniList -->
             <a href="${anilistUrl}" target="_blank" rel="noopener noreferrer" class="flex gap-3 items-start cursor-pointer transition-opacity ${isPaused ? 'grayscale opacity-50 hover:opacity-80' : (hasPassed ? 'opacity-80 hover:opacity-100' : 'opacity-100 hover:opacity-90')}">
               ${posterImg}
 
@@ -1023,7 +923,6 @@ def get_web_ui_html() -> HTMLResponse:
         `;
       }
 
-      // Multiple shows at the exact same air time
       const showsHtml = slot.items.map(item => {
         const show = item.show;
         const statusKey = (show.status || '').toUpperCase();
@@ -1068,7 +967,6 @@ def get_web_ui_html() -> HTMLResponse:
 
       return `
         <div class="relative group select-none">
-          <!-- Timeline Header Line (Time shown ONCE for all concurrent shows) -->
           <div class="flex items-center justify-between gap-1.5 mb-2">
             <div class="flex items-center gap-1.5">
               <span class="w-3 h-3 rounded-full ${dotColor} absolute -left-[15px] z-10"></span>
@@ -1076,7 +974,6 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          <!-- Concurrent Shows List -->
           <div class="space-y-3">
             ${showsHtml}
           </div>
@@ -1084,9 +981,6 @@ def get_web_ui_html() -> HTMLResponse:
       `;
     }
 
-    // ============================================================
-    // SHOW DETAILS & CONFIGURATION MODAL (Card Click)
-    // ============================================================
     async function viewShowRule(showId) {
       currentInspectedShowId = showId;
       const modal = document.getElementById('rule-modal');
@@ -1145,13 +1039,11 @@ def get_web_ui_html() -> HTMLResponse:
         `;
 
         const regexSections = data.has_rule ? `
-          <!-- Must Contain Filter (Editable Regex) -->
           <div class="space-y-1">
             <label for="modal-must-contain" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">Must Contain (Regex Filter)</label>
             <input type="text" id="modal-must-contain" value="${data.must_contain || ''}" placeholder=".*" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-emerald-400 focus:outline-none focus:border-zinc-500 shadow-inner select-all">
           </div>
 
-          <!-- Must Not Contain Filter (Editable Regex) -->
           <div class="space-y-1">
             <label for="modal-must-not-contain" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-400">Must Not Contain Filter</label>
             <input type="text" id="modal-must-not-contain" value="${data.must_not_contain || ''}" placeholder="(720p|480p|...)" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-zinc-300 focus:outline-none focus:border-zinc-500 shadow-inner select-all">
@@ -1159,7 +1051,6 @@ def get_web_ui_html() -> HTMLResponse:
         ` : noRulePlaceholder;
 
         const articlesSection = data.has_rule ? `
-          <!-- Live Matching Articles -->
           <div class="space-y-1 pt-0.5">
             <div class="flex items-center justify-between">
               <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Live Matching Articles in RSS Feed</span>
@@ -1174,7 +1065,6 @@ def get_web_ui_html() -> HTMLResponse:
         ` : '';
 
         contentEl.innerHTML = `
-          <!-- Assigned Feed & Rule State Row -->
           <div class="space-y-1">
             <div class="flex items-center justify-between">
               <label for="modal-feed-id" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">Assigned Feed</label>
@@ -1188,13 +1078,11 @@ def get_web_ui_html() -> HTMLResponse:
 
           ${regexSections}
 
-          <!-- Save Path (Full Width Row - Bigger so full path fits) -->
           <div class="space-y-1">
             <label for="modal-save-path" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">Save Path</label>
             <input type="text" id="modal-save-path" value="${data.save_path || data.save_folder || ''}" placeholder="~/Anime/${data.display_name}" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm font-mono text-zinc-100 focus:outline-none focus:border-zinc-500 shadow-inner" title="${data.save_path || ''}">
           </div>
 
-          <!-- Category & Ratio Limit (Split in 2 below Save Path) -->
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div class="space-y-1">
               <label for="modal-category" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">Category</label>
@@ -1244,7 +1132,6 @@ def get_web_ui_html() -> HTMLResponse:
       const currentMustContain = mustContainInput ? mustContainInput.value.trim() : '';
       const currentMustNotContain = mustNotContainInput ? mustNotContainInput.value.trim() : '';
 
-      // Check if anything was actually modified
       const hasChanged = !modalInitialState || (
         currentFeedId !== modalInitialState.current_feed_id ||
         currentSaveFolder !== modalInitialState.save_folder ||
@@ -1255,7 +1142,6 @@ def get_web_ui_html() -> HTMLResponse:
       );
 
       if (!hasChanged) {
-        // Nothing changed: close immediately without making API calls or showing notifications
         closeRuleModal();
         return;
       }
@@ -1331,7 +1217,6 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
-    // Feeds Tab (Drag & Drop Reordering)
     let dragSourceIndex = null;
 
     function handleDragStart(e, index) {
@@ -1366,7 +1251,6 @@ def get_web_ui_html() -> HTMLResponse:
       const movedItem = allFeeds.splice(dragSourceIndex, 1)[0];
       allFeeds.splice(targetIndex, 0, movedItem);
 
-      // Optimistically update local priority numbers and re-render
       allFeeds.forEach((f, idx) => { f.priority = idx + 1; });
       renderFeedsTable();
 
@@ -1433,7 +1317,6 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
-    // Settings Tab
     function updateTitleLanguageUi(lang) {
       const hiddenEl = document.getElementById('set-title-language');
       if (hiddenEl) hiddenEl.value = lang;
@@ -1687,9 +1570,6 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
-    // -------------------------------------------------------------
-    // Logs Tab Logic
-    // -------------------------------------------------------------
     let logsAutoRefreshInterval = null;
     let cachedLogs = [];
 
@@ -1759,13 +1639,10 @@ def get_web_ui_html() -> HTMLResponse:
       });
     }
 
-    // -------------------------------------------------------------
-    // Live Countdown & Status
-    // -------------------------------------------------------------
     let targetNextCheckTime = null;
     let nextCheckReason = '';
 
-    function formatNextCheckText(seconds, reason) {
+    function formatNextCheckText(seconds) {
       if (seconds === undefined || seconds === null) return 'Calculating...';
       const totalSec = Math.max(0, Math.floor(seconds));
       if (totalSec <= 0) return 'Checking now...';
@@ -1785,7 +1662,7 @@ def get_web_ui_html() -> HTMLResponse:
         } else {
           const now = Date.now();
           const remSec = Math.max(0, Math.floor((targetNextCheckTime - now) / 1000));
-          nextEl.textContent = formatNextCheckText(remSec, nextCheckReason);
+          nextEl.textContent = formatNextCheckText(remSec);
 
           if (nextCheckReason) {
             const targetDate = new Date(targetNextCheckTime);
@@ -1794,7 +1671,6 @@ def get_web_ui_html() -> HTMLResponse:
         }
       }
 
-      // Live-update all show card countdown badges
       document.querySelectorAll('.show-countdown[data-air-at]').forEach(el => {
         const airAt = el.getAttribute('data-air-at');
         const ep = el.getAttribute('data-ep');
@@ -1835,7 +1711,6 @@ def get_web_ui_html() -> HTMLResponse:
     setInterval(tickCountdown, 30000);
     toggleLogsAutoRefresh(true);
 
-    // Global keyboard shortcuts (Escape saves and closes active show modal)
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
         const modal = document.getElementById('rule-modal');

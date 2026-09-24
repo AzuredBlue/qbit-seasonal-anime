@@ -65,7 +65,6 @@ class TestRules(unittest.TestCase):
         self.assertEqual(rule_def["torrentParams"]["category"], "")
         self.assertTrue(rule_def["savePath"].endswith("Sousou no Frieren"))
 
-        # Test unconfirmed upcoming show is disabled
         upcoming_show = Monitored(
             id=2,
             anilist_id=999,
@@ -87,10 +86,8 @@ class TestRules(unittest.TestCase):
     def test_generate_season_variants_does_not_corrupt_pronoun_i(self):
         from qbit_seasonal_anime.core.rules import generate_season_variants
         variants = generate_season_variants("I Was Reincarnated as a Slime")
-        # Should not strip "I" or generate "Season 1" variants from pronoun "I"
         self.assertEqual(variants, ["I Was Reincarnated as a Slime"])
 
-        # Roman numerals II and III should still expand
         v2 = generate_season_variants("Mushoku Tensei III")
         self.assertIn("Mushoku Tensei S3", v2)
 
@@ -129,19 +126,15 @@ class TestRules(unittest.TestCase):
         import os
         home = os.path.expanduser("~")
 
-        # 1. Base template with {name}
         p1 = resolve_save_path("~/Anime/{name}", "BLEACH: Sennen Kessen-hen")
         self.assertEqual(p1, f"{home}/Anime/BLEACH - Sennen Kessen-hen")
 
-        # 2. Base template without {name} -> automatically filled in as subfolder
         p2 = resolve_save_path("~/Anime", "Sousou no Frieren")
         self.assertEqual(p2, f"{home}/Anime/Sousou no Frieren")
 
-        # 3. Custom show path with {name}
         p3 = resolve_save_path("~/Anime/{name}", "Dandadan", custom_save_folder="~/Downloads/{name}")
         self.assertEqual(p3, f"{home}/Downloads/Dandadan")
 
-        # 4. Custom show relative folder name
         p4 = resolve_save_path("~/Anime/{name}", "Aoashi", custom_save_folder="Aoashi 2nd Season")
         self.assertEqual(p4, f"{home}/Anime/Aoashi 2nd Season")
 

@@ -51,7 +51,6 @@ class TestStall(unittest.TestCase):
         self.assertTrue(any("completed all 12 episodes" in log for log in logs))
 
     def test_stall_triggers_fallback_to_next_feed(self):
-        # Expected Ep 2 was scheduled 48h ago (stall_wait_hours is 24h)
         show = Monitored(
             id=2,
             anilist_id=1002,
@@ -90,16 +89,13 @@ class TestStall(unittest.TestCase):
         self.session.refresh(show)
         self.session.refresh(hist)
 
-        # Old rule deleted
         mock_qbit.remove_rss_rule.assert_called_with(rule_name="[Seasonal] Stalled Anime")
-        # New rule created on Feed 2
         self.assertEqual(show.current_feed_id, 2)
         self.assertEqual(show.status, MonitoredStatus.UNCONFIRMED)
         self.assertEqual(hist.outcome, RuleOutcome.STALLED)
         self.assertTrue(any("Moved to feed 'Erai-raws'" in log for log in logs))
 
     def test_fixed_show_never_stalls(self):
-        # A confirmed (FIXED) show with an overdue episode should NOT be stalled
         show = Monitored(
             id=4,
             anilist_id=1004,
@@ -119,13 +115,11 @@ class TestStall(unittest.TestCase):
         logs = check_and_handle_stalls(self.session, mock_qbit, self.settings)
         self.session.refresh(show)
 
-        # Status must remain FIXED, rule must NOT be deleted
         self.assertEqual(show.status, MonitoredStatus.FIXED)
         self.assertEqual(show.current_feed_id, 1)
         mock_qbit.remove_rss_rule.assert_not_called()
 
     def test_stall_with_all_feeds_exhausted_enters_stalled_state(self):
-        # Only 1 feed available, and it failed
         show = Monitored(
             id=3,
             anilist_id=1003,
@@ -139,7 +133,6 @@ class TestStall(unittest.TestCase):
         )
         self.session.add(show)
 
-        # History showing feed 1 & feed 2 already stalled
         h1 = RuleHistory(id=10, monitored_id=3, feed_id=1, created_at=_utc_now() - timedelta(hours=48), outcome=RuleOutcome.STALLED)
         h2 = RuleHistory(id=11, monitored_id=3, feed_id=2, created_at=_utc_now() - timedelta(hours=48), outcome=RuleOutcome.STALLED)
         self.session.add(h1)
@@ -152,7 +145,6 @@ class TestStall(unittest.TestCase):
         logs = check_and_handle_stalls(self.session, mock_qbit, self.settings)
         self.session.refresh(show)
 
-        # State should be terminal STALLED (not paused)
         self.assertEqual(show.status, MonitoredStatus.STALLED)
         self.assertIsNone(show.current_feed_id)
         self.assertTrue(any("All feeds exhausted" in log for log in logs))

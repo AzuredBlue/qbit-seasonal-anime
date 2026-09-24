@@ -2,7 +2,7 @@
 
 A script that helps you manage your seasonal anime's RSS download rules automatically.
 
-This script is managed by default using `http://localhost:8085`. 
+The WebUI is available at `http://localhost:8085`.
 
 ## Images
 
@@ -19,7 +19,7 @@ This script is managed by default using `http://localhost:8085`.
 
 ## Features
 - **AniList Sync**: Automatically imports your seasonal anime watchlist.
-- **RSS Feeds Ranking**: Give priority to certain RSS Feeds for downloading your seasonal anime. Fallsback automatically to other feeds if not found.
+- **RSS Feeds Ranking**: Give priority to certain RSS feeds for downloading your seasonal anime. Falls back automatically to other feeds if needed.
 - **qBittorrent RSS Automation**: Automatically manages your qBittorrent auto-downloader rules for your seasonal anime.
 - **Calendar**: Creates a calendar for your seasonal anime.
 
@@ -56,4 +56,4 @@ After running it, you can open **`http://localhost:8085`** in your browser, wher
 
 After syncing with your AniList and making sure it can connect to qBit's WebUI, it will automatically create RSS Download Rules for each seasonal show. Once a show airs, it will automatically check for the best release (based on your RSS feed ranking) and adjust the RSS Download Rule so it matches it.
 
-It is recommended to run this script on startup instead of launching it manually, you can do this on Windows by creating a `shortcut` that runs in on the `startup` folder or with a `systemd service` on Linux.
+It is recommended to run this script at startup. On Windows, create a shortcut in the Startup folder; on Linux, use a systemd service.

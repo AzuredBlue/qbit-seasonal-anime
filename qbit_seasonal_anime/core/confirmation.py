@@ -114,7 +114,7 @@ def verify_and_confirm_rules_from_feeds(
 
         for a in articles:
             title = a.get("title", "")
-            is_match, score, parsed = match_release_to_show(title, show.aliases)
+            is_match, _, parsed = match_release_to_show(title, show.aliases)
             if is_match:
                 ep = parsed.get("episode")
                 if ep is not None:

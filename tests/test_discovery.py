@@ -30,7 +30,6 @@ class TestDiscovery(unittest.TestCase):
         res = discover_feed_for_show(show, self.feeds, mock_qbit)
         self.assertIsNotNone(res)
         feed, group, matched_title = res
-        # Should pick SubsPlease (priority 1) since both have it or SubsPlease is top
         self.assertEqual(feed.id, 1)
         self.assertEqual(group, "SubsPlease")
         self.assertEqual(matched_title, "Sousou no Frieren")
@@ -49,21 +48,9 @@ class TestDiscovery(unittest.TestCase):
         res = discover_feed_for_show(show, self.feeds, mock_qbit)
         self.assertIsNone(res)
 
-    def test_discover_feed_with_exclusion(self):
-        mock_qbit = MagicMock()
-        mock_qbit.get_rss_items.return_value = MOCK_QBIT_RSS_ITEMS
-
-        show = Monitored(
-            id=1,
-            anilist_id=154587,
-            display_name="Sousou no Frieren",
-            aliases_json='["Sousou no Frieren", "Frieren: Beyond Journey\'s End"]',
-        )
-
     def test_discover_feed_lower_priority_waits_for_grace_period_and_triggers_refresh(self):
         from datetime import datetime, timezone, timedelta
         mock_qbit = MagicMock()
-        # Feed 2 has release, Feed 1 does not
         mock_qbit.get_rss_items.return_value = {
             "Erai-raws": {
                 "url": "https://www.erai-raws.info/rss-1080p/",
@@ -77,7 +64,6 @@ class TestDiscovery(unittest.TestCase):
             }
         }
 
-        # Show aired only 1 minute ago (< 5 minute buffer)
         show = Monitored(
             id=3,
             anilist_id=55555,
@@ -87,7 +73,6 @@ class TestDiscovery(unittest.TestCase):
         )
 
         res = discover_feed_for_show(show, self.feeds, mock_qbit, preferred_feed_grace_seconds=300)
-        # Should return None (waiting on Feed 1 grace window) and trigger manual refresh
         self.assertIsNone(res)
         mock_qbit.refresh_rss_feeds.assert_called()
 
@@ -107,7 +92,6 @@ class TestDiscovery(unittest.TestCase):
             }
         }
 
-        # Show aired 10 minutes ago (> 5 minute buffer)
         show = Monitored(
             id=4,
             anilist_id=66666,
@@ -117,7 +101,6 @@ class TestDiscovery(unittest.TestCase):
         )
 
         res = discover_feed_for_show(show, self.feeds, mock_qbit, preferred_feed_grace_seconds=300)
-        # Should fallback to Feed 2 (Erai-Raws)
         self.assertIsNotNone(res)
         feed, group, matched_title = res
         self.assertEqual(feed.id, 2)
