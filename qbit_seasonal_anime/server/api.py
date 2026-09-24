@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings
 from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, MonitoredStatus, RuleOutcome, MatchHistory, Episode, EpisodeStatus, utc_now
-from qbit_seasonal_anime.clients.qbit import QBitClient
+from qbit_seasonal_anime.clients.qbit import QBitClient, QbitAuthenticationError, QbitClientError
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
 from qbit_seasonal_anime.core.discovery import RssSnapshot
@@ -868,12 +868,22 @@ async def run_cycle_now(session: Session = Depends(get_db)):
 
     s = get_settings(session)
     qbit = QBitClient(host=s.qbit_host, username=s.qbit_username, password=s.qbit_password, timeout=10)
+    try:
+        await asyncio.to_thread(qbit.test_connection)
+    except QbitAuthenticationError as e:
+        state.add_log(f"Manual supervision cycle blocked by qBittorrent authentication: {e}", "ERROR")
+        raise HTTPException(status_code=503, detail=f"qBittorrent authentication failed: {e}")
+    except QbitClientError as e:
+        state.add_log(f"Manual supervision cycle blocked because qBittorrent is unavailable: {e}", "WARNING")
+        raise HTTPException(status_code=503, detail=f"qBittorrent is unavailable: {e}")
+
     sup = Supervisor(session=session, qbit=qbit, anilist=anilist_client, settings=s)
 
     state.is_running_cycle = True
     state.add_log("Manual supervision cycle initiated from WebUI.", "INFO")
     try:
         logs = await sup.run_full_cycle()
+        await asyncio.to_thread(qbit.test_connection)
         state.last_cycle_time = datetime.now(timezone.utc)
         for l in logs:
             state.add_log(f"Supervisor: {l}", "INFO")
@@ -899,6 +909,12 @@ async def run_cycle_now(session: Session = Depends(get_db)):
             "target_next_check_time": state.target_next_check_time.isoformat(),
             "message": "Supervision cycle completed successfully."
         }
+    except QbitAuthenticationError as e:
+        state.add_log(f"Manual supervision cycle lost qBittorrent authentication: {e}", "ERROR")
+        raise HTTPException(status_code=503, detail=f"qBittorrent authentication failed: {e}")
+    except QbitClientError as e:
+        state.add_log(f"Manual supervision cycle lost the qBittorrent connection: {e}", "WARNING")
+        raise HTTPException(status_code=503, detail=f"qBittorrent is unavailable: {e}")
     except Exception as e:
         state.add_log(f"Error during supervision cycle: {e}", "ERROR")
         raise HTTPException(status_code=500, detail=str(e))
