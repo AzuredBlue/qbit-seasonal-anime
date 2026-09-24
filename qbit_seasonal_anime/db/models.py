@@ -212,6 +212,7 @@ class SeenFeedItem(SQLModel, table=True):
     item_id: str = Field(index=True)
     title: str = Field(default="")
     created_at: datetime = Field(default_factory=utc_now, index=True)
+    shielded_at: Optional[datetime] = Field(default=None, nullable=True, index=True)
 
 
 class GrabDecision(SQLModel, table=True):

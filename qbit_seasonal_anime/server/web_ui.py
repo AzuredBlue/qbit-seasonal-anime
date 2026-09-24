@@ -393,7 +393,7 @@ def get_web_ui_html() -> HTMLResponse:
       'UNCONFIRMED': { label: 'Testing', bg: 'bg-[#713f12] text-[#facc15] border-[#a16207]' },
       'UPCOMING': { label: 'Upcoming', bg: 'bg-[#1e3a8a] text-[#60a5fa] border-[#2563eb]' },
       'STALLED': { label: 'Stalled', bg: 'bg-[#7f1d1d] text-[#f87171] border-[#dc2626]' },
-      'COMPLETED': { label: 'Completed', bg: 'bg-[#064e3b] text-[#34d399] border-[#059669]' },
+      'COMPLETED': { label: 'Completed', bg: 'bg-[#312e81] text-[#c4b5fd] border-[#6366f1]' },
       'PAUSED': { label: 'Paused', bg: 'bg-[#27272a] text-[#a1a1aa] border-[#3f3f46]' },
     };
 
@@ -1028,7 +1028,7 @@ def get_web_ui_html() -> HTMLResponse:
          if (isDirect) {
            ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-sky-950/80 text-sky-300 border border-sky-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Direct Engine Active</span>';
          } else if (isCompleted) {
-          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Completed</span>';
+           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-indigo-950/80 text-indigo-300 border border-indigo-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>Completed</span>';
         } else if (isRuleActive) {
           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Enabled (Active)</span>';
         } else if (data.status === 'paused') {
@@ -1051,8 +1051,8 @@ def get_web_ui_html() -> HTMLResponse:
           : '<li class="text-zinc-500 text-xs font-mono py-2 text-center bg-[#141418] rounded">No cached RSS articles currently match this rule pattern.</li>';
 
         const noRulePlaceholder = isCompleted ? `
-          <div class="bg-[#121215] border border-emerald-950/60 rounded-lg p-3 text-center">
-            <div class="text-xs font-semibold text-emerald-400">Completed Series</div>
+           <div class="bg-[#121215] border border-indigo-950/60 rounded-lg p-3 text-center">
+             <div class="text-xs font-semibold text-indigo-300">Completed Series</div>
             <p class="text-[11px] text-zinc-400 mt-0.5">All episodes have aired and were confirmed downloaded. RSS rule has been disabled.</p>
           </div>
         ` : `

@@ -10,7 +10,7 @@ from qbit_seasonal_anime.core.discovery import RssSnapshot, discover_feed_for_sh
 from qbit_seasonal_anime.core.grabber import evaluate_and_grab_releases, sync_show_episodes
 from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule, disable_rule
 from qbit_seasonal_anime.core.stall import check_and_handle_stalls
-from qbit_seasonal_anime.db.models import Episode, EpisodeStatus, Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
+from qbit_seasonal_anime.db.models import Episode, EpisodeStatus, Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, SeenFeedItem, Settings, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.supervisor")
 
@@ -647,6 +647,14 @@ class Supervisor:
             except Exception as e:
                 logger.debug(f"RSS article shielding cache unavailable: {e}")
                 return logs
+        shielded_keys = {
+            (row.feed_url, row.item_id)
+            for row in self.session.exec(
+                select(SeenFeedItem).where(SeenFeedItem.shielded_at.is_not(None))
+            ).all()
+        }
+        shielded_count = 0
+        shielded_shows = set()
         for show in self.session.exec(select(Monitored)).all():
             if not show.current_feed_id:
                 continue
@@ -658,15 +666,46 @@ class Supervisor:
                 continue
             item_path = feed_paths[feed_url]
             for article in articles_by_url.get(feed_url, []):
-                if article.get("title") in titles:
-                    item_id = article.get("id") or article.get("torrentURL") or article.get("link")
-                    if not item_id:
-                        continue
-                    try:
-                        self.qbit.mark_rss_article_read(item_path, str(item_id))
-                        logs.append(f"Shielded owned release for '{show.display_name}': {article.get('title')}")
-                    except Exception as e:
-                        logger.debug(f"Could not shield owned RSS article: {e}")
+                title = str(article.get("title") or "")
+                if title not in titles:
+                    continue
+                item_id = article.get("id") or article.get("torrentURL") or article.get("link")
+                if not item_id:
+                    continue
+                item_id = str(item_id)
+                key = (feed_url, item_id)
+                if key in shielded_keys:
+                    continue
+                try:
+                    self.qbit.mark_rss_article_read(item_path, item_id)
+                    existing = self.session.exec(
+                        select(SeenFeedItem).where(
+                            SeenFeedItem.feed_url == feed_url,
+                            SeenFeedItem.item_id == item_id,
+                        )
+                    ).first()
+                    if existing:
+                        existing.title = title
+                        existing.shielded_at = utc_now()
+                        self.session.add(existing)
+                    else:
+                        self.session.add(SeenFeedItem(
+                            feed_url=feed_url,
+                            item_id=item_id,
+                            title=title,
+                            shielded_at=utc_now(),
+                        ))
+                    self.session.commit()
+                    shielded_keys.add(key)
+                    shielded_count += 1
+                    shielded_shows.add(show.display_name)
+                except Exception as e:
+                    logger.debug(f"Could not shield owned RSS article: {e}")
+        if shielded_count:
+            show_count = len(shielded_shows)
+            logs.append(
+                f"Marked {shielded_count} previously downloaded RSS release(s) as read across {show_count} show(s)."
+            )
         return logs
 
     def disable_managed_rules(self) -> List[str]:

@@ -110,6 +110,7 @@ def init_db(engine=None):
         for col_name, col_type in [
             ("title", "VARCHAR DEFAULT ''"),
             ("created_at", "TIMESTAMP"),
+            ("shielded_at", "TIMESTAMP"),
         ]:
             if col_name not in seen_cols:
                 session.exec(text(f"ALTER TABLE seen_feed_items ADD COLUMN {col_name} {col_type}"))
@@ -125,6 +126,7 @@ def init_db(engine=None):
             ("ix_monitored_pinned_feed_id", "monitored", "pinned_feed_id"),
             ("ix_monitored_status_current_feed", "monitored", "status, current_feed_id"),
             ("ix_episode_status_version", "episodes", "status, version"),
+            ("ix_seen_feed_item_shielded", "seen_feed_items", "shielded_at"),
             ("ix_torrent_operation_status_updated", "torrent_operations", "status, updated_at"),
             ("ix_grab_decision_episode_created", "grab_decisions", "episode, created_at"),
             ("ix_grab_decision_item", "grab_decisions", "feed_url, feed_item_id"),

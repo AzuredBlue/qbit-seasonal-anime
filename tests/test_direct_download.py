@@ -405,8 +405,10 @@ def test_rules_transition_marks_owned_articles_read():
     supervisor = Supervisor(session=session, qbit=qbit, anilist=MagicMock(), settings=settings)
 
     logs = supervisor.shield_owned_articles()
+    second_logs = supervisor.shield_owned_articles()
 
-    assert any("Shielded owned release" in log for log in logs)
+    assert any("previously downloaded RSS" in log for log in logs)
+    assert second_logs == []
     qbit.mark_rss_article_read.assert_called_once_with("SubsPlease", "ep1")
     session.close()
     engine.dispose()
