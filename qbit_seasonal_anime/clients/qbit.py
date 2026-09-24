@@ -121,6 +121,30 @@ class QBitClient:
         extract_feeds(items)
         return feeds
 
+    def get_rss_feed_paths(self) -> Dict[str, str]:
+        items = self.get_rss_items(with_data=False)
+        paths: Dict[str, str] = {}
+
+        def extract(tree: Dict[str, Any], prefix: str = ""):
+            for key, value in tree.items():
+                if not isinstance(value, dict):
+                    continue
+                current = f"{prefix}\\{key}" if prefix else key
+                if "url" in value:
+                    paths[value["url"]] = current
+                else:
+                    extract(value, current)
+
+        extract(items)
+        return paths
+
+    def mark_rss_article_read(self, item_path: str, article_id: str) -> None:
+        client = self.get_client()
+        try:
+            client.rss_mark_as_read(item_path=item_path, article_id=article_id)
+        except Exception as e:
+            raise QbitClientError(f"Failed to mark RSS article read: {e}") from e
+
     def get_rss_rules(self) -> Dict[str, Any]:
         """Fetch all RSS auto-downloading rules."""
         client = self.get_client()
@@ -155,6 +179,89 @@ class QBitClient:
             return client.torrents_info(category=category)
         except Exception as e:
             raise QbitClientError(f"Failed to get torrents for category '{category}': {e}") from e
+
+    def add_torrent(
+        self,
+        urls: Any,
+        save_path: str = "",
+        category: str = "",
+        tags: Optional[Any] = None,
+        is_paused: bool = False,
+        ratio_limit: Optional[float] = None,
+    ) -> bool:
+        client = self.get_client()
+        try:
+            kwargs: Dict[str, Any] = {"urls": urls}
+            if save_path:
+                kwargs["save_path"] = save_path
+            if category:
+                kwargs["category"] = category
+            if tags:
+                kwargs["tags"] = tags if isinstance(tags, str) else ",".join(tags)
+            if is_paused:
+                kwargs["is_paused"] = True
+            if ratio_limit is not None and ratio_limit >= 0:
+                kwargs["ratio_limit"] = ratio_limit
+            result = client.torrents_add(**kwargs)
+            logger.info(f"Added torrent {urls} (result: {result})")
+            return True
+        except Exception as e:
+            raise QbitClientError(f"Failed to add torrent: {e}") from e
+
+    def get_torrents(
+        self,
+        hashes: Optional[List[str]] = None,
+        category: Optional[str] = None,
+        tag: Optional[str] = None,
+    ) -> List[Any]:
+        client = self.get_client()
+        try:
+            kwargs: Dict[str, Any] = {}
+            if hashes:
+                kwargs["torrent_hashes"] = hashes
+            if category:
+                kwargs["category"] = category
+            if tag:
+                kwargs["tag"] = tag
+            return list(client.torrents_info(**kwargs))
+        except Exception as e:
+            raise QbitClientError(f"Failed to query torrents: {e}") from e
+
+    def delete_torrents(self, torrent_hashes: List[str], delete_files: bool = True) -> None:
+        if not torrent_hashes:
+            return
+        client = self.get_client()
+        try:
+            client.torrents_delete(delete_files=delete_files, torrent_hashes=torrent_hashes)
+        except Exception as e:
+            raise QbitClientError(f"Failed to delete torrents: {e}") from e
+
+    def pause_torrents(self, torrent_hashes: List[str]) -> None:
+        if not torrent_hashes:
+            return
+        client = self.get_client()
+        try:
+            client.torrents_pause(torrent_hashes=torrent_hashes)
+        except Exception as e:
+            raise QbitClientError(f"Failed to pause torrents: {e}") from e
+
+    def resume_torrents(self, torrent_hashes: List[str]) -> None:
+        if not torrent_hashes:
+            return
+        client = self.get_client()
+        try:
+            client.torrents_resume(torrent_hashes=torrent_hashes)
+        except Exception as e:
+            raise QbitClientError(f"Failed to resume torrents: {e}") from e
+
+    def recheck_torrents(self, torrent_hashes: List[str]) -> None:
+        if not torrent_hashes:
+            return
+        client = self.get_client()
+        try:
+            client.torrents_recheck(torrent_hashes=torrent_hashes)
+        except Exception as e:
+            raise QbitClientError(f"Failed to recheck torrents: {e}") from e
 
     def get_matching_articles(self, rule_name: str) -> Dict[str, List[str]]:
         """Return articles currently matching a given rule."""

@@ -7,9 +7,10 @@ from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError, get
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents, has_downloaded_final_episode
 from qbit_seasonal_anime.core.discovery import RssSnapshot, discover_feed_for_show, flatten_rss_articles
+from qbit_seasonal_anime.core.grabber import evaluate_and_grab_releases, sync_show_episodes
 from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule, disable_rule
 from qbit_seasonal_anime.core.stall import check_and_handle_stalls
-from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
+from qbit_seasonal_anime.db.models import Episode, EpisodeStatus, Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.supervisor")
 
@@ -64,6 +65,7 @@ class Supervisor:
                 ).all()
                 for show in shows_on_feed:
                     show.current_feed_id = None
+                    show.pinned_feed_id = None
                     if show.status == MonitoredStatus.FIXED:
                         show.status = MonitoredStatus.UNCONFIRMED
                     self.session.add(show)
@@ -132,6 +134,7 @@ class Supervisor:
         rss_snapshot: Optional[RssSnapshot] = None,
         parsed_articles: Optional[Dict[str, Dict[str, Any]]] = None,
         known_categories: Optional[Set[str]] = None,
+        create_qbit_rules: bool = True,
     ) -> List[str]:
         """Discover feeds and create initial rules for unassigned or newly added shows using the proactive approach."""
         logs = []
@@ -183,6 +186,21 @@ class Supervisor:
                 chosen_feed, obs_group, matched_title = res
                 show.matched_title = matched_title
                 show.matched_release_group = obs_group
+                if not create_qbit_rules:
+                    show.current_feed_id = chosen_feed.id
+                    show.status = MonitoredStatus.FIXED
+                    self.session.add(show)
+                    self.session.add(RuleHistory(
+                        monitored_id=show.id,
+                        feed_id=chosen_feed.id,
+                        created_at=utc_now(),
+                        outcome=RuleOutcome.CONFIRMED,
+                        note=f"Auto-detected on '{chosen_feed.qbit_feed_name}' (direct mode)",
+                    ))
+                    self.session.commit()
+                    msg = f"Assigned '{show.display_name}' to feed '{chosen_feed.qbit_feed_name}' (direct mode)"
+                    logs.append(msg)
+                    continue
                 try:
                     rule_name = create_or_update_rule(
                         qbit_client=self.qbit,
@@ -223,6 +241,21 @@ class Supervisor:
                     target_feed = avail[0] if avail else None
 
                 if target_feed:
+                    if not create_qbit_rules:
+                        show.current_feed_id = target_feed.id
+                        show.status = MonitoredStatus.UNCONFIRMED
+                        self.session.add(show)
+                        self.session.add(RuleHistory(
+                            monitored_id=show.id,
+                            feed_id=target_feed.id,
+                            created_at=utc_now(),
+                            outcome=RuleOutcome.PENDING,
+                            note=f"Assigned to #{target_feed.priority} feed '{target_feed.qbit_feed_name}' (direct mode)",
+                        ))
+                        self.session.commit()
+                        msg = f"Assigned '{show.display_name}' to Priority #{target_feed.priority} feed '{target_feed.qbit_feed_name}' (direct mode)"
+                        logs.append(msg)
+                        continue
                     try:
                         rule_name = create_or_update_rule(
                             qbit_client=self.qbit,
@@ -562,6 +595,127 @@ class Supervisor:
 
         return logs
 
+    def shield_owned_articles(
+        self,
+        articles_by_url: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[str]:
+        logs: List[str] = []
+        for show in self.session.exec(select(Monitored)).all():
+            sync_show_episodes(self.session, show)
+        owned_titles_by_show: Dict[int, set] = {}
+        feed_urls = {feed.id: feed.qbit_feed_url for feed in self.session.exec(select(Feed)).all()}
+        for show in self.session.exec(select(Monitored)).all():
+            titles = {
+                episode.release_title
+                for episode in self.session.exec(select(Episode).where(
+                    Episode.monitored_id == show.id,
+                    Episode.status.in_([
+                        EpisodeStatus.QUEUED,
+                        EpisodeStatus.DOWNLOADING,
+                        EpisodeStatus.COMPLETED,
+                        EpisodeStatus.REPLACING,
+                    ]),
+                )).all()
+                if episode.release_title
+                and (
+                    episode.status == EpisodeStatus.COMPLETED
+                    or bool(episode.torrent_hash)
+                )
+            }
+            history_titles = {
+                history.release_title
+                for history in self.session.exec(select(MatchHistory).where(
+                    MatchHistory.monitored_id == show.id,
+                )).all()
+                if history.release_title
+            }
+            titles |= history_titles
+            if titles and show.id:
+                owned_titles_by_show[show.id] = titles
+        if not owned_titles_by_show:
+            return logs
+        try:
+            feed_paths = self.qbit.get_rss_feed_paths()
+        except Exception as e:
+            logger.debug(f"RSS article shielding skipped: {e}")
+            return logs
+        if not feed_paths:
+            return logs
+        if articles_by_url is None:
+            try:
+                articles_by_url = flatten_rss_articles(self.qbit.get_rss_items(with_data=True))
+            except Exception as e:
+                logger.debug(f"RSS article shielding cache unavailable: {e}")
+                return logs
+        for show in self.session.exec(select(Monitored)).all():
+            if not show.current_feed_id:
+                continue
+            titles = owned_titles_by_show.get(show.id, set())
+            if not titles:
+                continue
+            feed_url = feed_urls.get(show.current_feed_id)
+            if not feed_url or feed_url not in feed_paths:
+                continue
+            item_path = feed_paths[feed_url]
+            for article in articles_by_url.get(feed_url, []):
+                if article.get("title") in titles:
+                    item_id = article.get("id") or article.get("torrentURL") or article.get("link")
+                    if not item_id:
+                        continue
+                    try:
+                        self.qbit.mark_rss_article_read(item_path, str(item_id))
+                        logs.append(f"Shielded owned release for '{show.display_name}': {article.get('title')}")
+                    except Exception as e:
+                        logger.debug(f"Could not shield owned RSS article: {e}")
+        return logs
+
+    def disable_managed_rules(self) -> List[str]:
+        logs: List[str] = []
+        rules = self.qbit.get_rss_rules()
+        shows = self.session.exec(select(Monitored)).all()
+        owned_names = {
+            rule_name
+            for rule_name in rules
+            if rule_name.startswith("[Seasonal]") or any(
+                show.qbit_rule_name == rule_name for show in shows
+            )
+        }
+        failed: List[str] = []
+        for rule_name in sorted(owned_names):
+            rule_def = rules.get(rule_name, {})
+            if rule_def.get("enabled") is False:
+                continue
+            try:
+                updated = dict(rule_def)
+                updated["enabled"] = False
+                self.qbit.set_rss_rule(rule_name, updated)
+                logs.append(f"Disabled managed RSS rule '{rule_name}'.")
+            except Exception as e:
+                failed.append(rule_name)
+                logger.warning(f"Could not disable managed RSS rule '{rule_name}': {e}")
+        current_rules = self.qbit.get_rss_rules()
+        remaining = [
+            rule_name
+            for rule_name in owned_names
+            if current_rules.get(rule_name, {}).get("enabled", False) is not False
+        ]
+        if remaining or failed:
+            raise QbitClientError(f"Managed RSS rules remain active: {', '.join(remaining or failed)}")
+        return logs
+
+    def prepare_download_mode(self, mode: str) -> List[str]:
+        if mode == "direct":
+            return self.disable_managed_rules()
+        logs: List[str] = []
+        snapshot = RssSnapshot(self.qbit)
+        logs.extend(self.shield_owned_articles())
+        logs.extend(self.bootstrap_unassigned_shows(
+            rss_snapshot=snapshot,
+            create_qbit_rules=True,
+        ))
+        logs.extend(self.sync_active_rules())
+        return logs
+
     async def run_full_cycle(self) -> List[str]:
         """Execute one complete supervision iteration."""
         all_logs: List[str] = []
@@ -575,36 +729,76 @@ class Supervisor:
 
         all_logs.extend(await asyncio.to_thread(self.prune_past_season_shows))
 
-        all_logs.extend(await asyncio.to_thread(
-            self.bootstrap_unassigned_shows,
-            rss_snapshot,
-            parsed_articles,
-            self._known_categories,
-        ))
+        mode = (getattr(self.settings, "download_mode", "rules") or "rules").strip().lower()
+        if mode not in {"rules", "observe", "direct"}:
+            mode = "rules"
 
-        all_logs.extend(await asyncio.to_thread(
-            verify_and_confirm_torrents,
-            self.session,
-            self.qbit,
-            self.settings,
-            rss_snapshot,
-            parsed_articles,
-            self._known_categories,
-        ))
+        if mode == "direct":
+            try:
+                all_logs.extend(await asyncio.to_thread(self.prepare_download_mode, "direct"))
+            except Exception as e:
+                all_logs.append(f"Direct mode blocked: {e}")
+                mode = "rules"
 
-        all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
-
-        all_logs.extend(await asyncio.to_thread(self.sync_active_rules))
-
-        all_logs.extend(await asyncio.to_thread(
-            check_and_handle_stalls,
-            self.session,
-            self.qbit,
-            self.settings,
-            rss_snapshot,
-            parsed_articles,
-            self._known_categories,
-        ))
+        if mode == "direct":
+            all_logs.extend(await asyncio.to_thread(
+                self.bootstrap_unassigned_shows,
+                rss_snapshot,
+                parsed_articles,
+                self._known_categories,
+                False,
+            ))
+            all_logs.extend(await asyncio.to_thread(
+                evaluate_and_grab_releases,
+                self.session,
+                self.qbit,
+                self.settings,
+                None,
+                "direct",
+                rss_snapshot,
+            ))
+            all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
+        else:
+            all_logs.extend(await asyncio.to_thread(self.shield_owned_articles))
+            all_logs.extend(await asyncio.to_thread(
+                self.bootstrap_unassigned_shows,
+                rss_snapshot,
+                parsed_articles,
+                self._known_categories,
+                True,
+            ))
+            if mode == "observe":
+                all_logs.extend(await asyncio.to_thread(
+                    evaluate_and_grab_releases,
+                    self.session,
+                    self.qbit,
+                    self.settings,
+                    None,
+                    "observe",
+                    rss_snapshot,
+                ))
+            else:
+                all_logs.extend(await asyncio.to_thread(
+                    verify_and_confirm_torrents,
+                    self.session,
+                    self.qbit,
+                    self.settings,
+                    rss_snapshot,
+                    parsed_articles,
+                    self._known_categories,
+                ))
+            all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
+            all_logs.extend(await asyncio.to_thread(self.sync_active_rules))
+            if mode == "rules":
+                all_logs.extend(await asyncio.to_thread(
+                    check_and_handle_stalls,
+                    self.session,
+                    self.qbit,
+                    self.settings,
+                    rss_snapshot,
+                    parsed_articles,
+                    self._known_categories,
+                ))
 
         total_shows = self.session.exec(select(Monitored)).all()
         now = utc_now()

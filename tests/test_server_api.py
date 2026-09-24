@@ -61,7 +61,9 @@ def client(db_engine, mock_qbit):
 def test_init_db_adds_query_indexes_to_legacy_schema(db_engine):
     expected_indexes = {
         "ix_monitored_current_feed_id",
+        "ix_monitored_pinned_feed_id",
         "ix_monitored_status_current_feed",
+        "ix_episode_status_version",
         "ix_rule_history_feed_id",
         "ix_rule_history_created_at",
         "ix_rule_history_monitored_created",
@@ -75,10 +77,37 @@ def test_init_db_adds_query_indexes_to_legacy_schema(db_engine):
 
     actual_indexes = {
         index["name"]
-        for table_name in ("monitored", "rule_history")
+        for table_name in ("monitored", "episodes", "rule_history")
         for index in inspect(db_engine).get_indexes(table_name)
     }
     assert expected_indexes <= actual_indexes
+
+
+def test_init_db_adds_rules_default_to_legacy_settings():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("""
+            CREATE TABLE settings (
+                id INTEGER PRIMARY KEY,
+                qbit_host VARCHAR,
+                qbit_username VARCHAR,
+                qbit_password VARCHAR,
+                base_dir VARCHAR,
+                default_category VARCHAR,
+                default_seed_ratio FLOAT,
+                anilist_username VARCHAR,
+                refresh_interval_minutes INTEGER,
+                stall_wait_hours INTEGER,
+                title_language VARCHAR
+            )
+        """)
+        connection.exec_driver_sql("INSERT INTO settings (id, title_language) VALUES (1, 'english')")
+
+    init_db(engine)
+
+    with Session(engine) as session:
+        assert session.exec(select(Settings)).first().download_mode == "rules"
+    engine.dispose()
 
 
 def test_index_returns_html(client):
@@ -103,6 +132,8 @@ def test_web_ui_guards_polling_requests(client):
     assert "loadHistory(queuedManual);" in html
     assert "document.addEventListener('visibilitychange'" in html
     assert "setInterval(updateStatus, 15000)" in html
+    assert "setDownloadMode('direct')" in html
+    assert "set-download-mode" in html
 
 
 def test_get_shows(client, session):
@@ -198,6 +229,34 @@ def test_settings_endpoints(client, session):
     assert s.qbit_host == "http://192.168.1.50:8080"
     assert s.default_category == "anime-seasonal"
     assert s.default_seed_ratio == 1.5
+
+
+def test_settings_switch_to_direct_verifies_rule_ownership(client, session, monkeypatch):
+    supervisor = MagicMock()
+    supervisor.prepare_download_mode.return_value = ["Disabled managed RSS rules."]
+    monkeypatch.setattr(api_module, "Supervisor", MagicMock(return_value=supervisor))
+    monkeypatch.setattr(api_module, "QBitClient", MagicMock())
+
+    response = client.post("/api/settings", json={"download_mode": "direct"})
+
+    assert response.status_code == 200
+    assert response.json()["download_mode"] == "direct"
+    supervisor.prepare_download_mode.assert_called_once_with("direct")
+    session.expire_all()
+    assert session.exec(select(Settings)).first().download_mode == "direct"
+
+
+def test_settings_switch_failure_keeps_rules_mode(client, session, monkeypatch):
+    supervisor = MagicMock()
+    supervisor.prepare_download_mode.side_effect = RuntimeError("rule still active")
+    monkeypatch.setattr(api_module, "Supervisor", MagicMock(return_value=supervisor))
+    monkeypatch.setattr(api_module, "QBitClient", MagicMock())
+
+    response = client.post("/api/settings", json={"download_mode": "direct"})
+
+    assert response.status_code == 409
+    session.expire_all()
+    assert session.exec(select(Settings)).first().download_mode == "rules"
 
 
 def test_system_status(client, session):
@@ -303,6 +362,50 @@ def test_edit_show_endpoint(client, session, mock_qbit):
     updated = session.get(Monitored, show.id)
     assert updated.save_folder == "Bleach Custom"
     assert updated.current_feed_id == feed.id
+
+
+def test_direct_rule_details_do_not_create_qbit_rules(client, session, mock_qbit):
+    settings = session.exec(select(Settings)).first()
+    settings.download_mode = "direct"
+    feed = Feed(id=3, qbit_feed_name="Direct Feed", qbit_feed_url="https://direct.example/rss", priority=1)
+    show = Monitored(
+        anilist_id=4100,
+        display_name="Direct Show",
+        aliases_json='["Direct Show"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    mock_qbit.get_rss_items.return_value = {
+        "Direct Feed": {
+            "url": feed.qbit_feed_url,
+            "articles": [{"id": "1", "title": "[Group] Direct Show - 01 [1080p].mkv"}],
+        }
+    }
+
+    response = client.get(f"/api/shows/{show.id}/rule")
+
+    assert response.status_code == 200
+    mock_qbit.set_rss_rule.assert_not_called()
+
+
+def test_get_direct_episode_records(client, session):
+    show = Monitored(
+        anilist_id=4200,
+        display_name="Episode Show",
+        aliases_json='["Episode Show"]',
+        status=MonitoredStatus.FIXED,
+        total_episodes=2,
+    )
+    session.add(show)
+    session.commit()
+
+    response = client.get(f"/api/shows/{show.id}/episodes")
+
+    assert response.status_code == 200
+    assert [episode["episode_number"] for episode in response.json()] == [1, 2]
 
 
 def test_title_language_setting_switch(client, session):

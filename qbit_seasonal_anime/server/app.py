@@ -53,6 +53,7 @@ async def background_supervisor_task():
                     session,
                     default_interval_seconds=default_interval,
                     qbit_client=qbit,
+                    download_mode=settings.download_mode,
                 )
                 now_utc = datetime.now(timezone.utc)
                 state.next_check_seconds = sleep_seconds

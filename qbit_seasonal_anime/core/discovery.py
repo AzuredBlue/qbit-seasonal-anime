@@ -112,6 +112,10 @@ def discover_feed_for_show(
         logger.info(f"No available feeds left for '{monitored.display_name}' (all excluded/empty).")
         return None
 
+    pinned = next((f for f in available_feeds if f.id == monitored.pinned_feed_id), None)
+    if pinned is not None:
+        available_feeds = [pinned]
+
     sorted_feeds = sorted(available_feeds, key=lambda f: f.priority)
     top_feed = sorted_feeds[0]
     aliases = monitored.aliases

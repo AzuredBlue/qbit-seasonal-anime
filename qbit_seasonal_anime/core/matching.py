@@ -85,6 +85,24 @@ def extract_release_group_tag(raw_title: str) -> Optional[str]:
     return None
 
 
+def extract_release_version(raw_title: str) -> int:
+    if not raw_title:
+        return 1
+    match = re.search(
+        r"(?:E\d+|\b\d+)v(\d+)\b|[\[(]v(\d+)[\])]|\b(?:v|ver\.?|version)\s*(\d+)\b",
+        raw_title,
+        re.IGNORECASE,
+    )
+    if match:
+        value = match.group(1) or match.group(2) or match.group(3)
+        if value and value.isdigit():
+            return int(value)
+    if re.search(r"\bREPACK\d*\b|\bPROPER\d*\b", raw_title, re.IGNORECASE):
+        repack = re.search(r"\bREPACK(\d+)\b", raw_title, re.IGNORECASE)
+        return 1 + int(repack.group(1)) if repack else 2
+    return 1
+
+
 def parse_release_title(raw_title: str) -> Dict[str, Any]:
     """Parse torrent release filename/title into structured metadata."""
     if not raw_title:
@@ -94,8 +112,10 @@ def parse_release_title(raw_title: str) -> Dict[str, Any]:
             "episode": None,
             "season": None,
             "release_group": None,
+            "version": 1,
         }
 
+    version = extract_release_version(raw_title)
     release_group = extract_release_group_tag(raw_title)
     cleaned = raw_title.strip()
 
@@ -188,6 +208,7 @@ def parse_release_title(raw_title: str) -> Dict[str, Any]:
             "episode": episode_num,
             "season": season_num,
             "release_group": release_group,
+            "version": version,
         }
 
     try:
@@ -233,6 +254,7 @@ def parse_release_title(raw_title: str) -> Dict[str, Any]:
         "episode": episode_num or g_episode,
         "season": season_num or (int(g_season) if str(g_season).isdigit() else None),
         "release_group": release_group or guess.get("release_group"),
+        "version": version,
     }
 
 

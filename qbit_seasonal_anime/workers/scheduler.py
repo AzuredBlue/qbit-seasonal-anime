@@ -18,6 +18,7 @@ def calculate_next_poll_interval(
     default_interval_seconds: int = 21600,
     hunting_interval_seconds: Optional[int] = None,
     qbit_client: Optional[QBitClient] = None,
+    download_mode: str = "rules",
 ) -> Tuple[int, str]:
     """
     Dynamically calculate the optimal sleep duration until the next check:
@@ -29,6 +30,10 @@ def calculate_next_poll_interval(
     """
     now = utc_now()
     shows = session.exec(select(Monitored)).all()
+    mode = str(download_mode).lower()
+    is_direct = mode == "direct"
+    is_observe = mode == "observe"
+    uses_direct_engine = is_direct or is_observe
 
     if not shows:
         return default_interval_seconds, "No monitored shows. Sleeping default interval."
@@ -78,6 +83,8 @@ def calculate_next_poll_interval(
         h_mins = effective_hunting_interval // 60
         h_secs = effective_hunting_interval % 60
         interval_str = f"{h_mins}m {h_secs}s" if h_secs else f"{h_mins}m"
+        if uses_direct_engine:
+            return effective_hunting_interval, f"Direct hunting: {len(hunting_shows)} show(s) waiting for a matching release ({names}). Checking every {interval_str}."
         return effective_hunting_interval, f"Hunting mode: {len(hunting_shows)} show(s) waiting for rule/release ({names}). Checking every {interval_str}."
 
     if unresolved_upcoming:
@@ -87,8 +94,14 @@ def calculate_next_poll_interval(
         if seconds_until_air < default_interval_seconds:
             sleep_duration = max(60, seconds_until_air)
             air_str = earliest_air.strftime("%d/%m %H:%M UTC")
+            if uses_direct_engine:
+                return sleep_duration, f"Upcoming premiere: '{earliest_show.display_name}' airs on {air_str} (in {sleep_duration // 60}m). Sleeping until air time to evaluate direct grabs."
             return sleep_duration, f"Upcoming premiere: '{earliest_show.display_name}' airs on {air_str} (in {sleep_duration // 60}m). Sleeping until air time to create rule."
 
+    if is_direct:
+        return default_interval_seconds, f"All active shows have direct ownership or are waiting for air dates. Sleeping {default_interval_seconds // 60}m until next routine check."
+    if is_observe:
+        return default_interval_seconds, f"All active shows are observed or waiting for air dates. Sleeping {default_interval_seconds // 60}m until next routine check."
     return default_interval_seconds, f"All active shows have working rules or are waiting for air dates. Sleeping {default_interval_seconds // 60}m until next routine check."
 
 
@@ -136,6 +149,7 @@ async def run_daemon_loop(poll_interval_seconds: Optional[int] = None) -> None:
                 session,
                 default_interval_seconds=default_interval,
                 qbit_client=qbit,
+                download_mode=settings.download_mode,
             )
             logger.info(f"{reason} (Next check in {sleep_duration}s / {sleep_duration // 60}m)")
 

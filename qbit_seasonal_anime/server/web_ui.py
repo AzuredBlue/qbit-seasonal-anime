@@ -262,6 +262,19 @@ def get_web_ui_html() -> HTMLResponse:
               </div>
             </div>
 
+            <div class="pt-4 border-t border-[#26262e] space-y-2">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs text-zinc-300 font-medium">Download Engine</span>
+                <div class="inline-flex items-center bg-[#121215] border border-[#30303a] rounded-lg p-0.5 text-xs font-mono select-none">
+                  <button type="button" onclick="setDownloadMode('rules')" id="btn-mode-rules" class="px-2.5 py-1 font-semibold rounded transition-colors text-sky-400 bg-[#262632] shadow-sm">Rules</button>
+                  <button type="button" onclick="setDownloadMode('observe')" id="btn-mode-observe" class="px-2.5 py-1 font-medium rounded transition-colors text-zinc-400 hover:text-zinc-200">Observe</button>
+                  <button type="button" onclick="setDownloadMode('direct')" id="btn-mode-direct" class="px-2.5 py-1 font-medium rounded transition-colors text-zinc-400 hover:text-zinc-200">Direct</button>
+                </div>
+                <input type="hidden" id="set-download-mode" value="rules">
+              </div>
+              <p class="text-xs text-zinc-500">Rules owns downloads. Observe logs direct decisions without adding torrents. Direct manages episodes and verified replacements.</p>
+            </div>
+
             <div class="pt-2 border-t border-[#26262e] space-y-2">
               <div class="flex items-center justify-between gap-3">
                 <button type="button" onclick="syncAniListNow()" class="bg-[#222228] hover:bg-[#2c2c34] text-zinc-200 text-xs py-1.5 px-3.5 rounded-lg border border-[#33333d] transition-colors font-medium">
@@ -613,6 +626,9 @@ def get_web_ui_html() -> HTMLResponse:
       }
 
       const feedName = show.current_feed_name || '[None]';
+      const versionLabel = show.v2_episodes_count > 0
+        ? `<span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border border-amber-800 bg-amber-950/90 text-amber-300">${show.v2_episodes_count} v2</span>`
+        : '';
 
       const isDimmed = isPaused || isCompleted;
       const posterImg = show.cover_image 
@@ -662,10 +678,11 @@ def get_web_ui_html() -> HTMLResponse:
               ${show.display_name}
             </h3>
 
-            <div class="pt-2 border-t border-[#222228] flex items-center justify-between gap-2.5 text-xs font-mono">
-              <span class="truncate text-zinc-400 font-medium min-w-0" title="${feedName}">${feedName}</span>
-              <span class="show-countdown flex-shrink-0 text-zinc-200 font-semibold ml-auto" ${countdownAttr} title="${show.next_airing_formatted ? show.next_airing_formatted : ''}">${airInfo}</span>
-            </div>
+             <div class="pt-2 border-t border-[#222228] flex items-center justify-between gap-2.5 text-xs font-mono">
+               <span class="truncate text-zinc-400 font-medium min-w-0" title="${feedName}">${feedName}</span>
+               ${versionLabel}
+               <span class="show-countdown flex-shrink-0 text-zinc-200 font-semibold ml-auto" ${countdownAttr} title="${show.next_airing_formatted ? show.next_airing_formatted : ''}">${airInfo}</span>
+             </div>
           </div>
 
         </div>
@@ -992,18 +1009,25 @@ def get_web_ui_html() -> HTMLResponse:
       modal.classList.remove('hidden');
 
       try {
-        const res = await fetch(`/api/shows/${showId}/rule`);
-        const data = await res.json();
+         const [res, episodeRes] = await Promise.all([
+           fetch(`/api/shows/${showId}/rule`),
+           fetch(`/api/shows/${showId}/episodes`)
+         ]);
+         const data = await res.json();
+         const episodes = episodeRes.ok ? await episodeRes.json() : [];
 
         const isCompleted = (data.status === 'completed');
         const isPaused = (data.status === 'paused');
-        const isRuleActive = data.enabled === true;
+         const isRuleActive = data.enabled === true;
+         const isDirect = data.download_mode === 'direct';
 
-        titleEl.textContent = data.display_name;
-        ruleNameEl.textContent = data.rule_name || (isCompleted ? 'Completed Series' : 'No Rule Configured');
+         titleEl.textContent = data.display_name;
+         ruleNameEl.textContent = isDirect ? 'Direct download engine' : (data.rule_name || (isCompleted ? 'Completed Series' : 'No Rule Configured'));
 
-        let ruleStatusPill = '';
-        if (isCompleted) {
+         let ruleStatusPill = '';
+         if (isDirect) {
+           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-sky-950/80 text-sky-300 border border-sky-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Direct Engine Active</span>';
+         } else if (isCompleted) {
           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Completed</span>';
         } else if (isRuleActive) {
           ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Enabled (Active)</span>';
@@ -1064,6 +1088,23 @@ def get_web_ui_html() -> HTMLResponse:
           </div>
         ` : '';
 
+        const episodeSection = data.download_mode === 'direct' ? `
+          <div class="space-y-1 pt-1">
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Episode Ownership</span>
+              <span class="text-[11px] font-mono text-zinc-500">${episodes.length} tracked</span>
+            </div>
+            <div class="bg-[#121215] border border-[#2e2e38] rounded-lg p-2 max-h-40 overflow-y-auto space-y-1">
+              ${episodes.length ? episodes.map(ep => `
+                <div class="flex items-center justify-between gap-2 text-[11px] font-mono px-2 py-1 rounded ${ep.version > 1 ? 'bg-amber-950/50 text-amber-300' : 'text-zinc-400'}">
+                  <span>Ep ${ep.episode_number}${ep.version > 1 ? ` · v${ep.version}` : ''}</span>
+                  <span class="truncate">${escapeHtml(ep.status)}${ep.last_error ? ` · ${escapeHtml(ep.last_error)}` : ''}</span>
+                </div>
+              `).join('') : '<div class="text-zinc-500 text-xs text-center py-2">No episode records yet.</div>'}
+            </div>
+          </div>
+        ` : '';
+
         contentEl.innerHTML = `
           <div class="space-y-1">
             <div class="flex items-center justify-between">
@@ -1094,8 +1135,9 @@ def get_web_ui_html() -> HTMLResponse:
             </div>
           </div>
 
-          ${articlesSection}
-        `;
+           ${articlesSection}
+           ${episodeSection}
+         `;
         modalInitialState = {
           current_feed_id: data.current_feed_id || 0,
           save_folder: (data.save_path || data.save_folder || '').trim(),
@@ -1349,6 +1391,40 @@ def get_web_ui_html() -> HTMLResponse:
       }
     }
 
+    function updateDownloadModeUi(mode) {
+      const selected = mode || 'rules';
+      const hidden = document.getElementById('set-download-mode');
+      if (hidden) hidden.value = selected;
+      ['rules', 'observe', 'direct'].forEach(name => {
+        const button = document.getElementById(`btn-mode-${name}`);
+        if (!button) return;
+        const active = name === selected;
+        button.className = active
+          ? 'px-2.5 py-1 font-semibold rounded transition-colors text-sky-400 bg-[#262632] shadow-sm'
+          : 'px-2.5 py-1 font-medium rounded transition-colors text-zinc-400 hover:text-zinc-200';
+      });
+    }
+
+    async function setDownloadMode(mode) {
+      if (!['rules', 'observe', 'direct'].includes(mode)) return;
+      if (mode === 'direct' && !confirm('Switch to Direct downloads? Managed RSS rules will be disabled before Direct mode is enabled. Episode replacement operations will be managed by the application.')) return;
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ download_mode: mode })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.message || 'Mode switch failed');
+        showToast(data.message || `Download engine switched to ${mode}.`, 'success');
+        await loadSettings();
+        await loadShows();
+        updateStatus(true);
+      } catch (err) {
+        showToast(`Mode switch failed: ${err}`, 'error');
+      }
+    }
+
     async function loadSettings() {
       try {
         const res = await fetch('/api/settings');
@@ -1362,8 +1438,9 @@ def get_web_ui_html() -> HTMLResponse:
         document.getElementById('set-ratio').value = s.default_seed_ratio ?? 1.0;
         document.getElementById('set-stall-window').value = s.stall_wait_hours ?? 24;
         document.getElementById('set-anilist-user').value = s.anilist_username || '';
-        document.getElementById('set-interval').value = s.refresh_interval_minutes ?? 360;
-        updateTitleLanguageUi(s.title_language || 'english');
+         document.getElementById('set-interval').value = s.refresh_interval_minutes ?? 360;
+         updateTitleLanguageUi(s.title_language || 'english');
+         updateDownloadModeUi(s.download_mode || 'rules');
       } catch (err) {
         showToast(`Failed loading settings: ${err}`, 'error');
       }
@@ -1379,8 +1456,9 @@ def get_web_ui_html() -> HTMLResponse:
         default_seed_ratio: parseFloat(document.getElementById('set-ratio').value),
         stall_wait_hours: parseInt(document.getElementById('set-stall-window').value),
         anilist_username: document.getElementById('set-anilist-user').value,
-        refresh_interval_minutes: parseInt(document.getElementById('set-interval').value),
-        title_language: document.getElementById('set-title-language').value,
+         refresh_interval_minutes: parseInt(document.getElementById('set-interval').value),
+         title_language: document.getElementById('set-title-language').value,
+         download_mode: document.getElementById('set-download-mode').value,
       };
       const pwd = document.getElementById('set-qbit-pass').value;
       if (pwd) payload.qbit_password = pwd;

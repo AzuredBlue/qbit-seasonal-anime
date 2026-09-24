@@ -7,11 +7,13 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings
-from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, MonitoredStatus, RuleOutcome, MatchHistory, utc_now
+from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, MonitoredStatus, RuleOutcome, MatchHistory, Episode, EpisodeStatus, utc_now
 from qbit_seasonal_anime.clients.qbit import QBitClient
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
+from qbit_seasonal_anime.core.discovery import RssSnapshot
 from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
+from qbit_seasonal_anime.core.grabber import evaluate_and_grab_releases, sync_show_episodes
 from qbit_seasonal_anime.core.rules import DEFAULT_MUST_NOT, build_regex_pattern, delete_rule
 from qbit_seasonal_anime.workers.scheduler import calculate_next_poll_interval
 from qbit_seasonal_anime.server.state import state
@@ -37,6 +39,9 @@ def get_shows(session: Session = Depends(get_db)):
     now = datetime.now(timezone.utc)
     shows = session.exec(select(Monitored).order_by(Monitored.id)).all()
     feeds = {f.id: f.qbit_feed_name for f in session.exec(select(Feed)).all()}
+    episodes_by_show: Dict[int, List[Episode]] = {}
+    for episode in session.exec(select(Episode)).all():
+        episodes_by_show.setdefault(episode.monitored_id, []).append(episode)
     prefer_english = (getattr(settings, "title_language", "english") == "english")
 
     result = []
@@ -69,6 +74,7 @@ def get_shows(session: Session = Depends(get_db)):
                 resolved_save_path = f"{base_template.rstrip('/')}/{folder_name}"
 
         resolved_save_path = compress_home_path(resolved_save_path)
+        show_episodes = episodes_by_show.get(s.id or 0, [])
 
         result.append({
             "id": s.id,
@@ -81,6 +87,7 @@ def get_shows(session: Session = Depends(get_db)):
             "season_year": s.season_year,
             "status": s.status.value,
             "current_feed_id": s.current_feed_id,
+            "pinned_feed_id": s.pinned_feed_id,
             "current_feed_name": feeds.get(s.current_feed_id) if s.current_feed_id else None,
             "qbit_rule_name": s.qbit_rule_name,
             "total_episodes": s.total_episodes,
@@ -93,6 +100,8 @@ def get_shows(session: Session = Depends(get_db)):
             "save_folder": s.save_folder,
             "save_path": resolved_save_path,
             "is_released": is_released,
+            "downloaded_episodes_count": sum(1 for episode in show_episodes if episode.status == EpisodeStatus.COMPLETED),
+            "v2_episodes_count": sum(1 for episode in show_episodes if episode.version > 1),
         })
     return result
 
@@ -102,6 +111,9 @@ def toggle_pause_show(show_id: int, session: Session = Depends(get_db), qbit: QB
     show = session.get(Monitored, show_id)
     if not show:
         raise HTTPException(status_code=404, detail="Show not found")
+
+    settings = get_settings(session)
+    direct_mode = (getattr(settings, "download_mode", "rules") or "rules").lower() == "direct"
 
     if show.status == MonitoredStatus.PAUSED:
         if show.status_before_pause:
@@ -115,7 +127,15 @@ def toggle_pause_show(show_id: int, session: Session = Depends(get_db), qbit: QB
             show.status = MonitoredStatus.UNCONFIRMED
         show.status_before_pause = None
 
-        if show.qbit_rule_name:
+        if direct_mode:
+            try:
+                managed = qbit.get_torrents(tag=f"qsa-show-{show.id}")
+                hashes = [str(t.hash) for t in managed if getattr(t, "hash", None)]
+                if hashes:
+                    qbit.resume_torrents(hashes)
+            except Exception as e:
+                state.add_log(f"Warning resuming direct torrents for '{show.display_name}': {e}", "WARNING")
+        elif show.qbit_rule_name:
             try:
                 rules = qbit.get_rss_rules()
                 if show.qbit_rule_name in rules:
@@ -133,7 +153,15 @@ def toggle_pause_show(show_id: int, session: Session = Depends(get_db), qbit: QB
         show.status_before_pause = show.status.value
         show.status = MonitoredStatus.PAUSED
 
-        if show.qbit_rule_name:
+        if direct_mode:
+            try:
+                managed = qbit.get_torrents(tag=f"qsa-show-{show.id}")
+                hashes = [str(t.hash) for t in managed if getattr(t, "hash", None)]
+                if hashes:
+                    qbit.pause_torrents(hashes)
+            except Exception as e:
+                state.add_log(f"Warning pausing direct torrents for '{show.display_name}': {e}", "WARNING")
+        elif show.qbit_rule_name:
             try:
                 rules = qbit.get_rss_rules()
                 if show.qbit_rule_name in rules:
@@ -172,6 +200,7 @@ def rediscover_show(show_id: int, session: Session = Depends(get_db), qbit: QBit
         session.add(hist)
 
     show.current_feed_id = None
+    show.pinned_feed_id = None
     show.qbit_rule_name = None
     show.matched_title = None
     show.matched_release_group = None
@@ -190,6 +219,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         raise HTTPException(status_code=404, detail="Show not found")
 
     settings = get_settings(session)
+    direct_mode = (getattr(settings, "download_mode", "rules") or "rules").lower() == "direct"
     feed = session.get(Feed, show.current_feed_id) if show.current_feed_id else None
 
     qbit_rule_data = {}
@@ -268,7 +298,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             if hr.release_title and hr.release_title not in matched_articles:
                 matched_articles.append(hr.release_title)
 
-    if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
+    if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed and not direct_mode:
         aliases = show.aliases
         test_pattern = build_regex_pattern(aliases)
         prepared_aliases = prepare_aliases(aliases)
@@ -400,10 +430,34 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         "category": qbit_rule_data.get("assignedCategory", settings.default_category),
         "ratio_limit": (qbit_rule_data.get("torrentParams") or {}).get("ratio_limit", settings.default_seed_ratio),
         "status": show.status.value,
+        "download_mode": getattr(settings, "download_mode", "rules") or "rules",
         "matched_title": show.matched_title,
         "matched_release_group": show.matched_release_group,
         "matched_articles": matched_articles[:15],
     }
+
+
+@router.get("/shows/{show_id}/episodes")
+def get_show_episodes(show_id: int, session: Session = Depends(get_db)):
+    show = session.get(Monitored, show_id)
+    if not show:
+        raise HTTPException(status_code=404, detail="Show not found")
+    episodes = sync_show_episodes(session, show)
+    episodes.sort(key=lambda episode: episode.episode_number)
+    return [
+        {
+            "id": episode.id,
+            "episode_number": episode.episode_number,
+            "status": episode.status.value,
+            "version": episode.version,
+            "release_title": episode.release_title,
+            "release_group": episode.release_group,
+            "torrent_hash": episode.torrent_hash,
+            "downloaded_at": episode.downloaded_at.isoformat() if episode.downloaded_at else None,
+            "last_error": episode.last_error,
+        }
+        for episode in episodes
+    ]
 
 
 class EditShowRequest(BaseModel):
@@ -422,6 +476,7 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         raise HTTPException(status_code=404, detail="Show not found")
 
     settings = get_settings(session)
+    direct_mode = (getattr(settings, "download_mode", "rules") or "rules").lower() == "direct"
     old_feed_id = show.current_feed_id
     new_feed_id = None if req.current_feed_id is not None and req.current_feed_id <= 0 else (req.current_feed_id if req.current_feed_id is not None else show.current_feed_id)
 
@@ -440,6 +495,9 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     if show.status == MonitoredStatus.COMPLETED:
         if req.current_feed_id is not None and req.current_feed_id > 0:
             show.current_feed_id = req.current_feed_id
+            show.pinned_feed_id = req.current_feed_id
+        elif req.current_feed_id is not None:
+            show.pinned_feed_id = None
         session.add(show)
         session.commit()
         return {"status": "success", "message": f"Updated metadata for completed show '{show.display_name}'."}
@@ -447,7 +505,7 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     category = req.category.strip() if req.category is not None and req.category.strip() else settings.default_category
     ratio_limit = req.ratio_limit if req.ratio_limit is not None and req.ratio_limit >= 0 else settings.default_seed_ratio
 
-    if show.qbit_rule_name:
+    if show.qbit_rule_name and not direct_mode:
         try:
             delete_rule(qbit, show.qbit_rule_name)
         except Exception as e:
@@ -456,8 +514,11 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
 
     if new_feed_id is None:
         show.current_feed_id = None
+        show.pinned_feed_id = None
         show.matched_title = None
         show.matched_release_group = None
+        if direct_mode:
+            show.qbit_rule_name = None
         show.status = MonitoredStatus.UNCONFIRMED
         session.add(show)
         session.commit()
@@ -469,6 +530,7 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         raise HTTPException(status_code=400, detail="Selected feed not found")
 
     show.current_feed_id = feed.id
+    show.pinned_feed_id = feed.id
 
     matched_article = None
     aliases = show.aliases
@@ -507,34 +569,42 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         show.status = MonitoredStatus.FIXED
         if req.must_contain is None:
             show.custom_regex = None
-        rname = create_or_update_rule(
-            qbit_client=qbit,
-            monitored=show,
-            feed=feed,
-            base_dir=settings.base_dir,
-            category=category,
-            ratio_limit=ratio_limit,
-            must_contain=show.custom_regex,
-            must_not_contain=show.custom_must_not,
-        )
-        show.qbit_rule_name = rname
-        msg = f"Assigned to '{feed.qbit_feed_name}' and matched cached release: {matched_article.get('title')} (Status: Working)"
+        if direct_mode:
+            show.qbit_rule_name = None
+            msg = f"Pinned to '{feed.qbit_feed_name}' and matched cached release: {matched_article.get('title')}"
+        else:
+            rname = create_or_update_rule(
+                qbit_client=qbit,
+                monitored=show,
+                feed=feed,
+                base_dir=settings.base_dir,
+                category=category,
+                ratio_limit=ratio_limit,
+                must_contain=show.custom_regex,
+                must_not_contain=show.custom_must_not,
+            )
+            show.qbit_rule_name = rname
+            msg = f"Assigned to '{feed.qbit_feed_name}' and matched cached release: {matched_article.get('title')} (Status: Working)"
     else:
         show.matched_title = None
         show.matched_release_group = None
         show.status = MonitoredStatus.UNCONFIRMED
-        rname = create_or_update_rule(
-            qbit_client=qbit,
-            monitored=show,
-            feed=feed,
-            base_dir=settings.base_dir,
-            category=category,
-            ratio_limit=ratio_limit,
-            must_contain=show.custom_regex,
-            must_not_contain=show.custom_must_not,
-        )
-        show.qbit_rule_name = rname
-        msg = f"Assigned to '{feed.qbit_feed_name}'. Rule created in Testing mode, waiting for next episode drop."
+        if direct_mode:
+            show.qbit_rule_name = None
+            msg = f"Pinned to '{feed.qbit_feed_name}'. Waiting for a matching direct release."
+        else:
+            rname = create_or_update_rule(
+                qbit_client=qbit,
+                monitored=show,
+                feed=feed,
+                base_dir=settings.base_dir,
+                category=category,
+                ratio_limit=ratio_limit,
+                must_contain=show.custom_regex,
+                must_not_contain=show.custom_must_not,
+            )
+            show.qbit_rule_name = rname
+            msg = f"Assigned to '{feed.qbit_feed_name}'. Rule created in Testing mode, waiting for next episode drop."
 
     session.add(show)
     session.commit()
@@ -624,6 +694,7 @@ def get_current_settings(session: Session = Depends(get_db)):
         "refresh_interval_minutes": s.refresh_interval_minutes,
         "stall_wait_hours": s.stall_wait_hours,
         "title_language": getattr(s, "title_language", "english") or "english",
+        "download_mode": getattr(s, "download_mode", "rules") or "rules",
     }
 
 
@@ -638,6 +709,7 @@ class UpdateSettingsRequest(BaseModel):
     refresh_interval_minutes: Optional[int] = None
     stall_wait_hours: Optional[int] = None
     title_language: Optional[str] = None
+    download_mode: Optional[str] = None
 
 
 @router.post("/settings")
@@ -675,10 +747,35 @@ def update_settings(req: UpdateSettingsRequest, session: Session = Depends(get_d
                 show.display_name = new_display
                 session.add(show)
 
+    mode_logs: List[str] = []
+    if req.download_mode is not None:
+        new_mode = req.download_mode.strip().lower()
+        if new_mode not in {"rules", "observe", "direct"}:
+            raise HTTPException(status_code=400, detail="download_mode must be rules, observe, or direct")
+        old_mode = (getattr(s, "download_mode", "rules") or "rules").strip().lower()
+        if new_mode != old_mode:
+            if state.is_running_cycle:
+                raise HTTPException(status_code=409, detail="Cannot switch download mode while a cycle is running")
+            qbit = QBitClient(host=s.qbit_host, username=s.qbit_username, password=s.qbit_password, timeout=10)
+            supervisor = Supervisor(session=session, qbit=qbit, anilist=anilist_client, settings=s)
+            try:
+                mode_logs = supervisor.prepare_download_mode(new_mode)
+            except Exception as e:
+                session.rollback()
+                raise HTTPException(status_code=409, detail=f"Could not switch download mode: {e}")
+            s.download_mode = new_mode
+            for log in mode_logs:
+                state.add_log(log, "INFO")
+
     session.add(s)
     session.commit()
     state.add_log("Settings updated successfully.", "INFO")
-    return {"status": "success", "message": "Settings updated."}
+    return {
+        "status": "success",
+        "message": "Settings updated.",
+        "download_mode": s.download_mode,
+        "logs": mode_logs,
+    }
 
 
 @router.post("/settings/test-qbit")
@@ -705,11 +802,22 @@ async def sync_anilist_now(session: Session = Depends(get_db)):
         logs.extend(sup.sync_feeds())
         sync_logs = await sup.sync_anilist_schedule()
         logs.extend(sync_logs)
-        bootstrap_logs = sup.bootstrap_unassigned_shows()
+        mode = (getattr(s, "download_mode", "rules") or "rules").strip().lower()
+        snapshot = RssSnapshot(qbit)
+        if mode == "direct":
+            logs.extend(sup.prepare_download_mode("direct"))
+        bootstrap_logs = sup.bootstrap_unassigned_shows(
+            rss_snapshot=snapshot,
+            create_qbit_rules=mode != "direct",
+        )
         logs.extend(bootstrap_logs)
-        from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
-        confirm_logs = verify_and_confirm_torrents(session, qbit, s)
-        logs.extend(confirm_logs)
+        if mode == "direct":
+            logs.extend(evaluate_and_grab_releases(session, qbit, s, mode="direct", rss_snapshot=snapshot))
+        elif mode == "observe":
+            logs.extend(evaluate_and_grab_releases(session, qbit, s, mode="observe", rss_snapshot=snapshot))
+        else:
+            from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
+            logs.extend(verify_and_confirm_torrents(session, qbit, s))
         rollover_logs = sup.reconcile_schedule_rollover()
         logs.extend(rollover_logs)
 
@@ -776,6 +884,7 @@ async def run_cycle_now(session: Session = Depends(get_db)):
             session,
             default_interval_seconds=default_interval,
             qbit_client=qbit,
+            download_mode=s.download_mode,
         )
         now_utc = datetime.now(timezone.utc)
         state.next_check_seconds = sleep_sec
@@ -799,6 +908,7 @@ async def run_cycle_now(session: Session = Depends(get_db)):
 
 @router.get("/status")
 def get_system_status(session: Session = Depends(get_db)):
+    settings = get_settings(session)
     shows = session.exec(select(Monitored)).all()
     feeds_count = session.exec(select(func.count(Feed.id))).one()
     now = utc_now()
@@ -834,6 +944,7 @@ def get_system_status(session: Session = Depends(get_db)):
 
     return {
         "daemon_active": True,
+        "download_mode": getattr(settings, "download_mode", "rules") or "rules",
         "is_running_cycle": state.is_running_cycle,
         "last_cycle_time": state.last_cycle_time.isoformat() if state.last_cycle_time else None,
         "next_check_reason": state.next_check_reason,
