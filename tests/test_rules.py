@@ -119,7 +119,53 @@ class TestRules(unittest.TestCase):
         self.assertEqual(rule_name, "[Seasonal] Frieren")
         mock_qbit.ensure_category_exists.assert_called_with("Anime")
         mock_qbit.set_rss_rule.assert_called_once()
-        mock_qbit.get_matching_articles.assert_called_with("[Seasonal] Frieren")
+        mock_qbit.get_matching_articles.assert_not_called()
+
+    def test_create_or_update_rule_runs_debug_check_when_enabled(self):
+        from unittest.mock import MagicMock, patch
+        from qbit_seasonal_anime.core.rules import create_or_update_rule
+        from qbit_seasonal_anime.db.models import Feed
+
+        mock_qbit = MagicMock()
+        mock_qbit.get_matching_articles.return_value = {"feed_url": ["[SubsPlease] Frieren - 08.mkv"]}
+        show = Monitored(id=1, anilist_id=101, display_name="Frieren", aliases_json='["Frieren"]')
+        feed = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss")
+
+        with patch("qbit_seasonal_anime.core.rules.logger.isEnabledFor", return_value=True):
+            create_or_update_rule(
+                qbit_client=mock_qbit,
+                monitored=show,
+                feed=feed,
+                base_dir="~/Anime",
+                category="Anime",
+                ratio_limit=1.0,
+            )
+
+        mock_qbit.get_matching_articles.assert_called_once_with("[Seasonal] Frieren")
+
+    def test_create_or_update_rule_reuses_cycle_category_cache(self):
+        from unittest.mock import MagicMock
+        from qbit_seasonal_anime.core.rules import create_or_update_rule
+        from qbit_seasonal_anime.db.models import Feed
+
+        mock_qbit = MagicMock()
+        show = Monitored(id=1, anilist_id=101, display_name="Frieren", aliases_json='["Frieren"]')
+        feed = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss")
+        known_categories = set()
+
+        for _ in range(2):
+            create_or_update_rule(
+                qbit_client=mock_qbit,
+                monitored=show,
+                feed=feed,
+                base_dir="~/Anime",
+                category="Anime",
+                ratio_limit=1.0,
+                known_categories=known_categories,
+            )
+
+        mock_qbit.ensure_category_exists.assert_called_once_with("Anime")
+        self.assertEqual(known_categories, {"Anime"})
 
     def test_resolve_save_path_placeholders(self):
         from qbit_seasonal_anime.core.rules import resolve_save_path

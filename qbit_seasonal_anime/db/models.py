@@ -72,7 +72,7 @@ class Monitored(SQLModel, table=True):
     title_english: Optional[str] = Field(default=None, nullable=True)
     aliases_json: str = Field(default="[]")
     status: MonitoredStatus = Field(default=MonitoredStatus.UNCONFIRMED, index=True)
-    current_feed_id: Optional[int] = Field(default=None, foreign_key="feeds.id", ondelete="SET NULL", nullable=True)
+    current_feed_id: Optional[int] = Field(default=None, foreign_key="feeds.id", ondelete="SET NULL", nullable=True, index=True)
     qbit_rule_name: Optional[str] = Field(default=None, nullable=True)
     total_episodes: Optional[int] = Field(default=None, nullable=True)
     next_airing_episode: Optional[int] = Field(default=None, nullable=True)
@@ -106,8 +106,8 @@ class RuleHistory(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     monitored_id: int = Field(foreign_key="monitored.id", ondelete="CASCADE", index=True)
-    feed_id: Optional[int] = Field(default=None, foreign_key="feeds.id", ondelete="SET NULL", nullable=True)
-    created_at: datetime = Field(default_factory=utc_now)
+    feed_id: Optional[int] = Field(default=None, foreign_key="feeds.id", ondelete="SET NULL", nullable=True, index=True)
+    created_at: datetime = Field(default_factory=utc_now, index=True)
     outcome: RuleOutcome = Field(default=RuleOutcome.PENDING, index=True)
     note: Optional[str] = Field(default=None, nullable=True)
 

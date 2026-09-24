@@ -3,7 +3,8 @@ import logging
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
-from qbit_seasonal_anime.core.matching import match_release_to_show
+from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
+from qbit_seasonal_anime.core.rules import build_regex_pattern
 from qbit_seasonal_anime.db.models import Feed, Monitored
 
 logger = logging.getLogger("qbit_seasonal_anime.core.discovery")
@@ -48,6 +49,42 @@ def flatten_rss_articles(rss_tree: Dict[str, Any]) -> Dict[str, List[Dict[str, A
     return feed_articles
 
 
+class RssSnapshot:
+    def __init__(self, qbit_client: QBitClient):
+        self.qbit_client = qbit_client
+        self._articles_by_url: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        self._load_error: Optional[Exception] = None
+        self._load_attempted = False
+
+    def get(self) -> Dict[str, List[Dict[str, Any]]]:
+        if self._load_attempted:
+            if self._load_error is not None:
+                raise self._load_error
+            return self._articles_by_url or {}
+
+        self._load_attempted = True
+        try:
+            rss_tree = self.qbit_client.get_rss_items(with_data=True)
+            articles = flatten_rss_articles(rss_tree)
+            self._articles_by_url = articles
+        except Exception as e:
+            self._articles_by_url = {}
+            self._load_error = e
+            raise
+        return articles
+
+    def invalidate(self) -> None:
+        self._articles_by_url = None
+        self._load_error = None
+        self._load_attempted = False
+
+    def refresh(self) -> Dict[str, List[Dict[str, Any]]]:
+        self.invalidate()
+        self.qbit_client.refresh_rss_feeds()
+        rss_tree = self.qbit_client.get_rss_items(with_data=True)
+        return flatten_rss_articles(rss_tree)
+
+
 def discover_feed_for_show(
     monitored: Monitored,
     feeds: List[Feed],
@@ -55,6 +92,8 @@ def discover_feed_for_show(
     excluded_feed_ids: Optional[List[int]] = None,
     cached_articles_by_url: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     preferred_feed_grace_seconds: int = 300,  # 5 minutes / 1-2 refresh cycles
+    rss_snapshot: Optional[RssSnapshot] = None,
+    parsed_articles: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Optional[Tuple[Feed, Optional[str], Optional[str]]]:
     """
     Discover the best feed for a monitored show.
@@ -75,21 +114,34 @@ def discover_feed_for_show(
 
     sorted_feeds = sorted(available_feeds, key=lambda f: f.priority)
     top_feed = sorted_feeds[0]
+    aliases = monitored.aliases
+    test_pattern = build_regex_pattern(aliases)
+    prepared_aliases = prepare_aliases(aliases)
+    if parsed_articles is None:
+        parsed_articles = {}
 
-    if cached_articles_by_url is not None:
-        articles_by_url = cached_articles_by_url
-    else:
-        try:
+    try:
+        if rss_snapshot is not None:
+            articles_by_url = rss_snapshot.get()
+        elif cached_articles_by_url is not None:
+            articles_by_url = cached_articles_by_url
+        else:
             rss_tree = qbit_client.get_rss_items(with_data=True)
             articles_by_url = flatten_rss_articles(rss_tree)
-        except QbitClientError as e:
-            logger.warning(f"Could not fetch RSS cache for discovery: {e}.")
-            articles_by_url = {}
+    except QbitClientError as e:
+        logger.warning(f"Could not fetch RSS cache for discovery: {e}.")
+        articles_by_url = {}
 
     top_articles = articles_by_url.get(top_feed.qbit_feed_url) or []
     for art in top_articles:
         title = art.get("title", "")
-        is_match, score, parsed = match_release_to_show(title, monitored.aliases)
+        is_match, score, parsed = match_release_to_show(
+            title,
+            aliases,
+            test_pattern=test_pattern,
+            prepared_aliases=prepared_aliases,
+            parsed_cache=parsed_articles,
+        )
         if is_match:
             logger.info(
                 f"Discovered #1 priority match for '{monitored.display_name}' in feed '{top_feed.qbit_feed_name}': "
@@ -102,7 +154,13 @@ def discover_feed_for_show(
         articles = articles_by_url.get(feed.qbit_feed_url) or []
         for art in articles:
             title = art.get("title", "")
-            is_match, _, parsed = match_release_to_show(title, monitored.aliases)
+            is_match, _, parsed = match_release_to_show(
+                title,
+                aliases,
+                test_pattern=test_pattern,
+                prepared_aliases=prepared_aliases,
+                parsed_cache=parsed_articles,
+            )
             if is_match:
                 lower_match = (feed, parsed.get("release_group"), parsed.get("title"))
                 break
@@ -122,16 +180,27 @@ def discover_feed_for_show(
                 f"Observed release on Priority #{matched_feed.priority} '{matched_feed.qbit_feed_name}' for '{monitored.display_name}', "
                 f"but waiting {preferred_feed_grace_seconds / 60:.1f}m buffer for Priority #1 '{top_feed.qbit_feed_name}' (elapsed: {elapsed_m:.1f}m)."
             )
+            if rss_snapshot is not None:
+                rss_snapshot.invalidate()
             qbit_client.refresh_rss_feeds()
             return None
 
         try:
-            qbit_client.refresh_rss_feeds()
-            fresh_tree = qbit_client.get_rss_items(with_data=True)
-            fresh_articles = flatten_rss_articles(fresh_tree)
+            if rss_snapshot is not None:
+                fresh_articles = rss_snapshot.refresh()
+            else:
+                qbit_client.refresh_rss_feeds()
+                fresh_tree = qbit_client.get_rss_items(with_data=True)
+                fresh_articles = flatten_rss_articles(fresh_tree)
             for art in (fresh_articles.get(top_feed.qbit_feed_url) or []):
                 t = art.get("title", "")
-                m, sc, pr = match_release_to_show(t, monitored.aliases)
+                m, sc, pr = match_release_to_show(
+                    t,
+                    aliases,
+                    test_pattern=test_pattern,
+                    prepared_aliases=prepared_aliases,
+                    parsed_cache=parsed_articles,
+                )
                 if m:
                     logger.info(f"Priority #1 feed '{top_feed.qbit_feed_name}' caught up after refresh for '{monitored.display_name}'!")
                     return top_feed, pr.get("release_group"), pr.get("title")

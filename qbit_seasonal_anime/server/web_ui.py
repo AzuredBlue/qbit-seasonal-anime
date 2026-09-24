@@ -1464,7 +1464,7 @@ def get_web_ui_html() -> HTMLResponse:
         const data = await res.json();
         showToast(data.message || 'Check completed.', 'success');
         loadShows();
-        updateStatus();
+        updateStatus(true);
       } catch (err) {
         showToast(`Check error: ${err}`, 'error');
       } finally {
@@ -1475,6 +1475,9 @@ def get_web_ui_html() -> HTMLResponse:
     }
 
     let cachedHistory = [];
+    let historyLoadInFlight = false;
+    let historyLoadQueued = false;
+    let historyManualRefreshQueued = false;
 
 
     function formatRelativeTime(isoStr) {
@@ -1493,6 +1496,12 @@ def get_web_ui_html() -> HTMLResponse:
     }
 
     async function loadHistory(manual = false) {
+      if (historyLoadInFlight) {
+        historyLoadQueued = true;
+        if (manual) historyManualRefreshQueued = true;
+        return;
+      }
+      historyLoadInFlight = true;
       try {
         const res = await fetch('/api/history?limit=100');
         cachedHistory = await res.json();
@@ -1500,6 +1509,14 @@ def get_web_ui_html() -> HTMLResponse:
         if (manual) showToast('History refreshed.', 'info');
       } catch (err) {
         if (manual) showToast(`Failed to load history: ${err}`, 'error');
+      } finally {
+        historyLoadInFlight = false;
+        if (historyLoadQueued) {
+          const queuedManual = manual || historyManualRefreshQueued;
+          historyLoadQueued = false;
+          historyManualRefreshQueued = false;
+          loadHistory(queuedManual);
+        }
       }
     }
 
@@ -1641,6 +1658,8 @@ def get_web_ui_html() -> HTMLResponse:
 
     let targetNextCheckTime = null;
     let nextCheckReason = '';
+    let statusUpdateInFlight = false;
+    let statusUpdateQueued = false;
 
     function formatNextCheckText(seconds) {
       if (seconds === undefined || seconds === null) return 'Calculating...';
@@ -1682,11 +1701,15 @@ def get_web_ui_html() -> HTMLResponse:
       });
     }
 
-    async function updateStatus() {
+    async function updateStatus(force = false) {
+      if (statusUpdateInFlight) {
+        if (force) statusUpdateQueued = true;
+        return;
+      }
+      if (!force && document.hidden) return;
+      statusUpdateInFlight = true;
       try {
-        const res = await fetch('/api/status');
-        const st = await res.json();
-        
+        const st = await apiFetch('/api/status');
         nextCheckReason = st.next_check_reason || '';
         if (st.target_next_check_time) {
           targetNextCheckTime = new Date(st.target_next_check_time).getTime();
@@ -1701,7 +1724,14 @@ def get_web_ui_html() -> HTMLResponse:
         document.getElementById('stat-stalled').textContent = `${st.counts.stalled} Stalled`;
 
         if (activeTab === 'history') loadHistory();
-      } catch (err) {}
+      } catch {
+      } finally {
+        statusUpdateInFlight = false;
+        if (statusUpdateQueued) {
+          statusUpdateQueued = false;
+          updateStatus(true);
+        }
+      }
     }
 
     loadShows();
@@ -1710,6 +1740,10 @@ def get_web_ui_html() -> HTMLResponse:
     setInterval(updateStatus, 15000);
     setInterval(tickCountdown, 30000);
     toggleLogsAutoRefresh(true);
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) updateStatus();
+    });
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {

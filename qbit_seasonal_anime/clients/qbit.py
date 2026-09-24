@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import qbittorrentapi
 
 logger = logging.getLogger("qbit_seasonal_anime.clients.qbit")
@@ -52,18 +52,20 @@ class QBitClient:
 
         raise QbitClientError(f"Cannot connect to qBittorrent at {self.host} after {max_retries} attempts: {last_err}")
 
-    def ensure_category_exists(self, category: str) -> None:
+    def ensure_category_exists(self, category: str) -> bool:
         """Ensure a category exists in qBittorrent, creating it if needed."""
         if not category or not category.strip():
-            return
+            return True
         try:
             client = self.get_client()
             cats = client.torrent_categories.categories
             if category not in cats:
                 client.torrent_categories.create_category(name=category)
                 logger.info(f"Created category '{category}' in qBittorrent.")
+            return True
         except Exception as e:
             logger.debug(f"Could not verify/create category '{category}': {e}")
+            return False
 
     def test_connection(self) -> Dict[str, str]:
         """Verify credentials and return application and API versions."""
@@ -171,6 +173,75 @@ class QBitClient:
             logger.debug("Triggered immediate RSS feeds refresh in qBittorrent.")
         except Exception as e:
             logger.debug(f"Could not trigger RSS refresh in qBittorrent: {e}")
+
+    def get_rule_match_times(
+        self,
+        pairs: List[Tuple[str, str]],
+    ) -> Optional[Dict[Tuple[str, str], Optional[datetime]]]:
+        unique_pairs = list(dict.fromkeys(pairs))
+        result: Dict[Tuple[str, str], Optional[datetime]] = {pair: None for pair in unique_pairs}
+        if not unique_pairs:
+            return result
+
+        log_lookup_succeeded = False
+        try:
+            client = self.get_client()
+            logs = client.log_main(last_known_id=-1)
+            log_lookup_succeeded = True
+        except Exception as e:
+            logger.debug(f"Could not search qBittorrent log for match events: {e}")
+            logs = []
+
+        try:
+            reversed_logs = list(reversed(logs))
+        except Exception as e:
+            logger.debug(f"Could not iterate qBittorrent match events: {e}")
+            reversed_logs = []
+            log_lookup_succeeded = False
+
+        for rule_name, release_title in unique_pairs:
+            for entry in reversed_logs:
+                try:
+                    msg = entry.message
+                except Exception as e:
+                    logger.debug(f"Could not read qBittorrent match event: {e}")
+                    continue
+                if not isinstance(msg, str) or "is accepted by rule" not in msg or release_title not in msg:
+                    continue
+                try:
+                    result[(rule_name, release_title)] = datetime.fromtimestamp(
+                        entry.timestamp,
+                        tz=timezone.utc,
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not parse qBittorrent match timestamp: {e}")
+                else:
+                    break
+
+        unresolved = [pair for pair in unique_pairs if result[pair] is None]
+        if not unresolved:
+            return result
+
+        rule_lookup_succeeded = False
+        try:
+            rules = self.get_rss_rules()
+            rule_lookup_succeeded = True
+        except Exception as e:
+            logger.debug(f"Could not read rule lastMatch values: {e}")
+            rules = {}
+
+        for rule_name, release_title in unresolved:
+            rule_def = rules.get(rule_name)
+            if rule_def and rule_def.get("lastMatch"):
+                try:
+                    dt = parsedate_to_datetime(rule_def["lastMatch"])
+                    result[(rule_name, release_title)] = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                except Exception as e:
+                    logger.debug(f"Could not parse qBittorrent rule lastMatch: {e}")
+
+        if not log_lookup_succeeded and not rule_lookup_succeeded:
+            return None
+        return result
 
     def get_rule_match_time(self, rule_name: str, release_title: str) -> Optional[datetime]:
         """

@@ -1,11 +1,14 @@
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
+from qbit_seasonal_anime.server import api as api_module
 from qbit_seasonal_anime.server.app import create_app
 from qbit_seasonal_anime.db.models import Monitored, Feed, MonitoredStatus, Settings
 from qbit_seasonal_anime.server.api import get_db, get_qbit
+from qbit_seasonal_anime.db.session import init_db
 
 
 @pytest.fixture
@@ -55,6 +58,29 @@ def client(db_engine, mock_qbit):
         yield test_client
 
 
+def test_init_db_adds_query_indexes_to_legacy_schema(db_engine):
+    expected_indexes = {
+        "ix_monitored_current_feed_id",
+        "ix_monitored_status_current_feed",
+        "ix_rule_history_feed_id",
+        "ix_rule_history_created_at",
+        "ix_rule_history_monitored_created",
+        "ix_rule_history_monitored_outcome_feed",
+    }
+    with db_engine.begin() as connection:
+        for index_name in expected_indexes:
+            connection.exec_driver_sql(f"DROP INDEX IF EXISTS {index_name}")
+
+    init_db(db_engine)
+
+    actual_indexes = {
+        index["name"]
+        for table_name in ("monitored", "rule_history")
+        for index in inspect(db_engine).get_indexes(table_name)
+    }
+    assert expected_indexes <= actual_indexes
+
+
 def test_index_returns_html(client):
     response = client.get("/")
     assert response.status_code == 200
@@ -65,6 +91,18 @@ def test_index_returns_html(client):
     assert "Calendar" in response.text
     assert "tab-calendar" in response.text
     assert "calendar-weekly-grid" in response.text
+
+
+def test_web_ui_guards_polling_requests(client):
+    response = client.get("/")
+    html = response.text
+    assert "if (!force && document.hidden) return;" in html
+    assert "if (force) statusUpdateQueued = true;" in html
+    assert "if (historyLoadInFlight) {" in html
+    assert "historyLoadQueued = true;" in html
+    assert "loadHistory(queuedManual);" in html
+    assert "document.addEventListener('visibilitychange'" in html
+    assert "setInterval(updateStatus, 15000)" in html
 
 
 def test_get_shows(client, session):
@@ -163,11 +201,61 @@ def test_settings_endpoints(client, session):
 
 
 def test_system_status(client, session):
+    session.add(Feed(qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.example/rss", priority=1))
+    session.add(Feed(qbit_feed_name="Feed 2", qbit_feed_url="https://feed2.example/rss", priority=2))
+    session.add(Monitored(anilist_id=7001, display_name="Working", status=MonitoredStatus.FIXED))
+    session.add(Monitored(anilist_id=7002, display_name="Upcoming", status=MonitoredStatus.UNCONFIRMED))
+    session.add(Monitored(anilist_id=7003, display_name="Stalled", status=MonitoredStatus.STALLED))
+    session.add(Monitored(anilist_id=7004, display_name="Paused", status=MonitoredStatus.PAUSED))
+    session.add(Monitored(anilist_id=7005, display_name="Completed", status=MonitoredStatus.COMPLETED))
+    session.commit()
+
     res = client.get("/api/status")
     assert res.status_code == 200
     st = res.json()
     assert st["daemon_active"] is True
-    assert "counts" in st
+    assert st["total_shows"] == 5
+    assert st["counts"] == {
+        "works": 1,
+        "upcoming": 1,
+        "testing": 0,
+        "stalled": 1,
+        "paused": 1,
+        "completed": 1,
+        "feeds": 2,
+    }
+
+
+def test_manual_cycle_offloads_scheduler_calculation(client, monkeypatch):
+    supervisor = MagicMock()
+    supervisor.run_full_cycle = AsyncMock(return_value=["Cycle complete"])
+    monkeypatch.setattr(api_module, "Supervisor", MagicMock(return_value=supervisor))
+    for name, value in {
+        "is_running_cycle": False,
+        "last_cycle_time": None,
+        "next_check_reason": api_module.state.next_check_reason,
+        "next_check_seconds": api_module.state.next_check_seconds,
+        "target_next_check_time": api_module.state.target_next_check_time,
+    }.items():
+        monkeypatch.setattr(api_module.state, name, value)
+
+    scheduler = MagicMock(return_value=(321, "Next cycle"))
+    monkeypatch.setattr(api_module, "calculate_next_poll_interval", scheduler)
+    to_thread = AsyncMock(side_effect=lambda func, *args, **kwargs: func(*args, **kwargs))
+    fake_asyncio = MagicMock()
+    fake_asyncio.to_thread = to_thread
+    monkeypatch.setattr(api_module, "asyncio", fake_asyncio)
+
+    response = client.post("/api/cycle/run")
+
+    assert response.status_code == 200
+    assert response.json()["next_check_seconds"] == 321
+    assert response.json()["next_check_reason"] == "Next cycle"
+    supervisor.run_full_cycle.assert_awaited_once_with()
+    to_thread.assert_awaited_once()
+    assert to_thread.await_args.args[0] is scheduler
+    scheduler.assert_called_once()
+    assert api_module.state.is_running_cycle is False
 
 
 def test_delete_show(client, session):

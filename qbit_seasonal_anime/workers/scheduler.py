@@ -34,12 +34,6 @@ def calculate_next_poll_interval(
         return default_interval_seconds, "No monitored shows. Sleeping default interval."
 
     effective_hunting_interval = hunting_interval_seconds
-    if effective_hunting_interval is None:
-        if qbit_client:
-            effective_hunting_interval = qbit_client.get_rss_refresh_interval_seconds()
-        else:
-            effective_hunting_interval = 315  # 5 minutes + 15s
-
     hunting_shows = []
     unresolved_upcoming = []
 
@@ -73,6 +67,11 @@ def calculate_next_poll_interval(
                 unresolved_upcoming.append((airing_at, s))
 
     if hunting_shows:
+        if effective_hunting_interval is None:
+            if qbit_client:
+                effective_hunting_interval = qbit_client.get_rss_refresh_interval_seconds()
+            else:
+                effective_hunting_interval = 315
         names = ", ".join(f"'{s.display_name}'" for s in hunting_shows[:3])
         if len(hunting_shows) > 3:
             names += f" and {len(hunting_shows) - 3} more"

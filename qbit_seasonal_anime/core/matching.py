@@ -15,6 +15,17 @@ GUESSIT_OPTIONS: Dict[str, Any] = {"excludes": ["country", "language"]}
 STOPWORDS: set = {"the", "a", "an", "no", "wa", "ga", "to", "de", "ni", "la", "le", "el"}
 
 
+def prepare_aliases(aliases: List[str]) -> List[Tuple[str, str]]:
+    prepared = []
+    for alias in aliases:
+        if not alias:
+            continue
+        normalized = normalize_title(alias)
+        if normalized:
+            prepared.append((alias, normalized))
+    return prepared
+
+
 def normalize_title(title: str) -> str:
     """Normalize anime title for comparison by standardizing seasons, roman numerals, and symbols."""
     if not title:
@@ -225,7 +236,11 @@ def parse_release_title(raw_title: str) -> Dict[str, Any]:
     }
 
 
-def calculate_match_score(parsed_title: str, aliases: List[str]) -> Tuple[float, Optional[str]]:
+def calculate_match_score(
+    parsed_title: str,
+    aliases: List[str],
+    prepared_aliases: Optional[List[Tuple[str, str]]] = None,
+) -> Tuple[float, Optional[str]]:
     """
     Calculate maximum fuzzy match score against a list of aliases.
     Returns (highest_score, best_matching_alias).
@@ -244,12 +259,10 @@ def calculate_match_score(parsed_title: str, aliases: List[str]) -> Tuple[float,
     best_score = 0.0
     best_alias = None
 
-    for alias in aliases:
-        if not alias:
-            continue
-        norm_alias = normalize_title(alias)
-        if not norm_alias:
-            continue
+    if prepared_aliases is None:
+        prepared_aliases = prepare_aliases(aliases)
+
+    for alias, norm_alias in prepared_aliases:
 
         if norm_parsed == norm_alias:
             return 100.0, alias
@@ -286,18 +299,27 @@ def match_release_to_show(
     raw_title: str,
     aliases: List[str],
     threshold: float = FUZZY_MATCH_THRESHOLD,
+    test_pattern: Optional[str] = None,
+    prepared_aliases: Optional[List[Tuple[str, str]]] = None,
+    parsed_cache: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[bool, float, Dict[str, Any]]:
     """
     Evaluate if an RSS item or torrent matches an anime show.
     Rejects batches and lower resolutions, then matches against the show's testing regex or aliases.
     Returns (is_match, score, parsed_metadata).
     """
-    parsed = parse_release_title(raw_title)
+    if parsed_cache is not None and raw_title in parsed_cache:
+        parsed = dict(parsed_cache[raw_title])
+    else:
+        parsed = parse_release_title(raw_title)
+        if parsed_cache is not None:
+            parsed_cache[raw_title] = dict(parsed)
     if not is_valid_release(raw_title):
         return False, 0.0, parsed
 
-    from qbit_seasonal_anime.core.rules import build_regex_pattern
-    test_pattern = build_regex_pattern(aliases)
+    if test_pattern is None:
+        from qbit_seasonal_anime.core.rules import build_regex_pattern
+        test_pattern = build_regex_pattern(aliases)
     try:
         m = re.search(test_pattern, raw_title, flags=re.IGNORECASE)
         if m:
@@ -309,6 +331,10 @@ def match_release_to_show(
         logger.debug(f"Testing regex match error: {e}")
 
     parsed_title = parsed.get("title", "")
-    score, best_alias = calculate_match_score(parsed_title, aliases)
+    score, best_alias = calculate_match_score(
+        parsed_title,
+        aliases,
+        prepared_aliases=prepared_aliases,
+    )
     is_match = score >= threshold
     return is_match, score, parsed

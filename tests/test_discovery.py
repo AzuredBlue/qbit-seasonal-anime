@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock
-from qbit_seasonal_anime.core.discovery import discover_feed_for_show, flatten_rss_articles
+from qbit_seasonal_anime.core.discovery import RssSnapshot, discover_feed_for_show, flatten_rss_articles
 from qbit_seasonal_anime.db.models import Feed, Monitored
 from tests.fixtures import MOCK_QBIT_RSS_ITEMS
 
@@ -10,6 +10,54 @@ class TestDiscovery(unittest.TestCase):
         self.feed_top = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss/?r=1080", priority=1)
         self.feed_second = Feed(id=2, qbit_feed_name="Erai-raws", qbit_feed_url="https://www.erai-raws.info/rss-1080p/", priority=2)
         self.feeds = [self.feed_second, self.feed_top]  # Unordered to test priority sorting
+
+    def test_rss_snapshot_reuses_data_and_reloads_after_refresh(self):
+        mock_qbit = MagicMock()
+        mock_qbit.get_rss_items.return_value = MOCK_QBIT_RSS_ITEMS
+        snapshot = RssSnapshot(mock_qbit)
+
+        first = snapshot.get()
+        second = snapshot.get()
+        self.assertIs(first, second)
+        mock_qbit.get_rss_items.assert_called_once()
+
+        snapshot.refresh()
+        self.assertEqual(mock_qbit.get_rss_items.call_count, 2)
+        mock_qbit.refresh_rss_feeds.assert_called_once()
+        snapshot.get()
+        self.assertEqual(mock_qbit.get_rss_items.call_count, 3)
+
+    def test_rss_snapshot_caches_failed_load_for_cycle(self):
+        from qbit_seasonal_anime.clients.qbit import QbitClientError
+
+        mock_qbit = MagicMock()
+        mock_qbit.get_rss_items.side_effect = QbitClientError("RSS unavailable")
+        snapshot = RssSnapshot(mock_qbit)
+
+        with self.assertRaises(QbitClientError):
+            snapshot.get()
+        with self.assertRaises(QbitClientError):
+            snapshot.get()
+        mock_qbit.get_rss_items.assert_called_once()
+
+        snapshot.invalidate()
+        with self.assertRaises(QbitClientError):
+            snapshot.get()
+        self.assertEqual(mock_qbit.get_rss_items.call_count, 2)
+
+    def test_rss_snapshot_invalidates_before_refresh_failure(self):
+        mock_qbit = MagicMock()
+        mock_qbit.get_rss_items.return_value = MOCK_QBIT_RSS_ITEMS
+        snapshot = RssSnapshot(mock_qbit)
+        snapshot.get()
+        mock_qbit.refresh_rss_feeds.side_effect = RuntimeError("refresh failed")
+
+        with self.assertRaises(RuntimeError):
+            snapshot.refresh()
+
+        mock_qbit.refresh_rss_feeds.side_effect = None
+        snapshot.get()
+        self.assertEqual(mock_qbit.get_rss_items.call_count, 2)
 
     def test_flatten_rss_articles(self):
         articles_by_url = flatten_rss_articles(MOCK_QBIT_RSS_ITEMS)

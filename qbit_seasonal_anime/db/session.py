@@ -82,6 +82,17 @@ def init_db(engine=None):
             session.exec(text("ALTER TABLE match_history ADD COLUMN matched_regex VARCHAR"))
             session.commit()
 
+        for index_name, table_name, columns in [
+            ("ix_monitored_current_feed_id", "monitored", "current_feed_id"),
+            ("ix_monitored_status_current_feed", "monitored", "status, current_feed_id"),
+            ("ix_rule_history_feed_id", "rule_history", "feed_id"),
+            ("ix_rule_history_created_at", "rule_history", "created_at"),
+            ("ix_rule_history_monitored_created", "rule_history", "monitored_id, created_at DESC"),
+            ("ix_rule_history_monitored_outcome_feed", "rule_history", "monitored_id, outcome, feed_id"),
+        ]:
+            session.exec(text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})"))
+        session.commit()
+
         stmt = select(Settings)
         settings = session.exec(stmt).first()
         if not settings:

@@ -43,6 +43,11 @@ async def test_supervisor_full_cycle():
     supervisor = Supervisor(session=session, qbit=mock_qbit, anilist=mock_anilist, settings=settings)
 
     logs = await supervisor.run_full_cycle()
+    full_rss_calls = [
+        call for call in mock_qbit.get_rss_items.call_args_list
+        if call.kwargs.get("with_data") is True
+    ]
+    assert len(full_rss_calls) == 1
     session.refresh(show)
 
     feeds = session.exec(select(Feed)).all()

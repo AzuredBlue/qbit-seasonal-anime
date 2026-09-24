@@ -1,9 +1,9 @@
 from datetime import timedelta, timezone
 import logging
-from typing import List
+from typing import Any, Dict, List, Optional, Set
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
-from qbit_seasonal_anime.core.discovery import discover_feed_for_show
+from qbit_seasonal_anime.core.discovery import RssSnapshot, discover_feed_for_show
 from qbit_seasonal_anime.core.rules import create_or_update_rule, delete_rule, disable_rule
 from qbit_seasonal_anime.core.confirmation import has_downloaded_final_episode
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
@@ -15,12 +15,17 @@ def check_and_handle_stalls(
     session: Session,
     qbit_client: QBitClient,
     settings: Settings,
+    rss_snapshot: Optional[RssSnapshot] = None,
+    parsed_articles: Optional[Dict[str, Dict[str, Any]]] = None,
+    known_categories: Optional[Set[str]] = None,
 ) -> List[str]:
     """
     Check for finished shows and air-date stalled releases.
     Triggers automatic fallback to the next priority feed when stalled.
     """
     logs: List[str] = []
+    if parsed_articles is None:
+        parsed_articles = {}
     now = utc_now()
     stall_delta = timedelta(hours=settings.stall_wait_hours)
 
@@ -67,6 +72,7 @@ def check_and_handle_stalls(
                 select(RuleHistory)
                 .where(RuleHistory.monitored_id == show.id)
                 .order_by(RuleHistory.created_at.desc())
+                .limit(1)
             )
             latest_hist = session.exec(hist_stmt).first()
 
@@ -121,6 +127,8 @@ def check_and_handle_stalls(
                         feeds=all_feeds,
                         qbit_client=qbit_client,
                         excluded_feed_ids=failed_feed_ids,
+                        rss_snapshot=rss_snapshot,
+                        parsed_articles=parsed_articles,
                     )
 
                     if discovery_res:
@@ -137,6 +145,7 @@ def check_and_handle_stalls(
                                 category=settings.default_category,
                                 ratio_limit=settings.default_seed_ratio,
                                 release_group=obs_group,
+                                known_categories=known_categories,
                             )
                             show.current_feed_id = fallback_feed.id
                             show.qbit_rule_name = rule_name
@@ -172,6 +181,7 @@ def check_and_handle_stalls(
                                     category=settings.default_category,
                                     ratio_limit=settings.default_seed_ratio,
                                     release_group=None,
+                                    known_categories=known_categories,
                                 )
                                 show.current_feed_id = fallback_feed.id
                                 show.qbit_rule_name = rule_name

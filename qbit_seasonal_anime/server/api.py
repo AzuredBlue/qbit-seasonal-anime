@@ -1,7 +1,9 @@
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings
@@ -9,7 +11,8 @@ from qbit_seasonal_anime.db.models import Monitored, Feed, RuleHistory, Monitore
 from qbit_seasonal_anime.clients.qbit import QBitClient
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
-from qbit_seasonal_anime.core.rules import DEFAULT_MUST_NOT, delete_rule
+from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
+from qbit_seasonal_anime.core.rules import DEFAULT_MUST_NOT, build_regex_pattern, delete_rule
 from qbit_seasonal_anime.workers.scheduler import calculate_next_poll_interval
 from qbit_seasonal_anime.server.state import state
 
@@ -224,12 +227,12 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             .where(MatchHistory.monitored_id == show.id)
             .where(MatchHistory.matched_regex != None)
             .order_by(MatchHistory.created_at.desc())
+            .limit(1)
         ).first()
         if hist_match and hist_match.matched_regex:
             saved_regex = hist_match.matched_regex
 
     if not saved_regex and show.matched_title:
-        from qbit_seasonal_anime.core.rules import build_regex_pattern
         saved_regex = build_regex_pattern(
             show.aliases,
             matched_title=show.matched_title,
@@ -237,7 +240,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         )
 
     if not saved_regex and feed:
-        from qbit_seasonal_anime.core.rules import build_regex_pattern
         saved_regex = build_regex_pattern(show.aliases)
 
     if not matched_articles and feed_items and saved_regex:
@@ -267,12 +269,21 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                 matched_articles.append(hr.release_title)
 
     if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
-        from qbit_seasonal_anime.core.matching import match_release_to_show
+        aliases = show.aliases
+        test_pattern = build_regex_pattern(aliases)
+        prepared_aliases = prepare_aliases(aliases)
+        parsed_articles = {}
         best_ep = None
         best_title = None
         best_parsed = None
         for title in matched_articles:
-            is_match, _, parsed = match_release_to_show(title, show.aliases)
+            is_match, _, parsed = match_release_to_show(
+                title,
+                aliases,
+                test_pattern=test_pattern,
+                prepared_aliases=prepared_aliases,
+                parsed_cache=parsed_articles,
+            )
             if is_match:
                 ep = parsed.get("episode")
                 if ep is not None:
@@ -291,6 +302,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
                 select(RuleHistory)
                 .where(RuleHistory.monitored_id == show.id)
                 .order_by(RuleHistory.created_at.desc())
+                .limit(1)
             )
             latest_hist = session.exec(hist_stmt).first()
             if latest_hist and latest_hist.outcome == RuleOutcome.PENDING:
@@ -336,7 +348,6 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
             if not match_time:
                 match_time = utc_now()
 
-            from qbit_seasonal_anime.core.rules import build_regex_pattern
             regex_pat = qbit_rule_data.get("mustContain") or show.custom_regex or build_regex_pattern(
                 show.aliases,
                 matched_title=show.matched_title,
@@ -460,18 +471,27 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     show.current_feed_id = feed.id
 
     matched_article = None
+    aliases = show.aliases
+    test_pattern = build_regex_pattern(aliases)
+    prepared_aliases = prepare_aliases(aliases)
+    parsed_articles = {}
     try:
         rss_data = qbit.get_rss_items(with_data=True)
         from qbit_seasonal_anime.core.discovery import flatten_rss_articles
         articles_by_feed = flatten_rss_articles(rss_data)
         feed_articles = articles_by_feed.get(feed.qbit_feed_url, [])
 
-        from qbit_seasonal_anime.core.matching import match_release_to_show
         best_art = None
         best_parsed = None
         best_score = 0
         for art in feed_articles:
-            is_match, score, parsed_info = match_release_to_show(art.get("title", ""), show.aliases)
+            is_match, score, parsed_info = match_release_to_show(
+                art.get("title", ""),
+                aliases,
+                test_pattern=test_pattern,
+                prepared_aliases=prepared_aliases,
+                parsed_cache=parsed_articles,
+            )
             if is_match and score > best_score:
                 best_score = score
                 best_art = art
@@ -751,7 +771,8 @@ async def run_cycle_now(session: Session = Depends(get_db)):
             state.add_log(f"Supervisor: {l}", "INFO")
 
         default_interval = max(60, s.refresh_interval_minutes * 60)
-        sleep_sec, reason = calculate_next_poll_interval(
+        sleep_sec, reason = await asyncio.to_thread(
+            calculate_next_poll_interval,
             session,
             default_interval_seconds=default_interval,
             qbit_client=qbit,
@@ -779,7 +800,7 @@ async def run_cycle_now(session: Session = Depends(get_db)):
 @router.get("/status")
 def get_system_status(session: Session = Depends(get_db)):
     shows = session.exec(select(Monitored)).all()
-    feeds_count = len(session.exec(select(Feed)).all())
+    feeds_count = session.exec(select(func.count(Feed.id))).one()
     now = utc_now()
 
     works = sum(1 for s in shows if s.status == MonitoredStatus.FIXED)
@@ -841,7 +862,7 @@ def get_recent_logs(limit: int = 100):
 def get_match_history(limit: int = 100, session: Session = Depends(get_db)):
     stmt = select(MatchHistory).order_by(MatchHistory.created_at.desc()).limit(limit)
     items = session.exec(stmt).all()
-    from qbit_seasonal_anime.core.rules import build_regex_pattern
+
 
     shows_map = {s.id: s for s in session.exec(select(Monitored)).all()}
     res = []

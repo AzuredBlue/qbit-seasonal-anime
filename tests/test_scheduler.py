@@ -75,6 +75,33 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(dur, 21600)
         self.assertIn("working rules", reason)
 
+    def test_fixed_show_does_not_query_rss_refresh_interval(self):
+        from unittest.mock import MagicMock
+
+        show = Monitored(
+            id=6,
+            anilist_id=606,
+            display_name="Already Working Anime",
+            aliases_json='["Already Working Anime"]',
+            status=MonitoredStatus.FIXED,
+            current_feed_id=1,
+            next_airing_episode=1,
+            next_airing_at=utc_now() - timedelta(days=1),
+        )
+        self.session.add(show)
+        self.session.commit()
+
+        mock_qbit = MagicMock()
+        duration, reason = calculate_next_poll_interval(
+            self.session,
+            default_interval_seconds=21600,
+            qbit_client=mock_qbit,
+        )
+
+        self.assertEqual(duration, 21600)
+        self.assertIn("working rules", reason)
+        mock_qbit.get_rss_refresh_interval_seconds.assert_not_called()
+
     def test_no_hunting_for_show_without_release_date(self):
         show = Monitored(
             id=2,

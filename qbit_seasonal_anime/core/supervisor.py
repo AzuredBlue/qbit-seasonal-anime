@@ -1,12 +1,12 @@
 import asyncio
 import logging
 from datetime import timezone, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set
 from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.anilist import AniListClient, AniListError, get_current_and_next_season
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents, has_downloaded_final_episode
-from qbit_seasonal_anime.core.discovery import discover_feed_for_show, flatten_rss_articles
+from qbit_seasonal_anime.core.discovery import RssSnapshot, discover_feed_for_show, flatten_rss_articles
 from qbit_seasonal_anime.core.rules import build_rule_definition, build_rule_name, create_or_update_rule, delete_rule, disable_rule
 from qbit_seasonal_anime.core.stall import check_and_handle_stalls
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
@@ -36,10 +36,12 @@ class Supervisor:
         self.qbit = qbit
         self.anilist = anilist
         self.settings = settings
+        self._known_categories: Set[str] = set()
 
     def sync_feeds(self) -> List[str]:
         """Fetch RSS feeds from qBittorrent and ensure they are registered in the database, pruning any removed feeds."""
         logs = []
+        had_pending_changes = bool(self.session.new or self.session.dirty or self.session.deleted)
         try:
             qbit_feeds = self.qbit.get_rss_feeds_flat()
         except QbitClientError as e:
@@ -53,6 +55,7 @@ class Supervisor:
         added = 0
         removed = 0
         renamed = 0
+        priorities_changed = False
 
         for url, f in list(existing_feeds_by_url.items()):
             if url not in qbit_urls:
@@ -103,8 +106,10 @@ class Supervisor:
             if feed_item.priority != idx:
                 feed_item.priority = idx
                 self.session.add(feed_item)
+                priorities_changed = True
 
-        self.session.commit()
+        if had_pending_changes or added or removed or renamed or priorities_changed:
+            self.session.commit()
 
         total = len(existing_feeds_by_url)
         summary_parts = []
@@ -122,7 +127,12 @@ class Supervisor:
 
         return logs
 
-    def bootstrap_unassigned_shows(self) -> List[str]:
+    def bootstrap_unassigned_shows(
+        self,
+        rss_snapshot: Optional[RssSnapshot] = None,
+        parsed_articles: Optional[Dict[str, Dict[str, Any]]] = None,
+        known_categories: Optional[Set[str]] = None,
+    ) -> List[str]:
         """Discover feeds and create initial rules for unassigned or newly added shows using the proactive approach."""
         logs = []
         stmt = select(Monitored).where(
@@ -136,20 +146,29 @@ class Supervisor:
             return logs
 
         top_feed = all_feeds[0]
+        if parsed_articles is None:
+            parsed_articles = {}
 
         try:
-            rss_tree = self.qbit.get_rss_items(with_data=True)
-            cached_articles = flatten_rss_articles(rss_tree)
+            if rss_snapshot is not None:
+                cached_articles = rss_snapshot.get()
+            else:
+                rss_tree = self.qbit.get_rss_items(with_data=True)
+                cached_articles = flatten_rss_articles(rss_tree)
         except QbitClientError as e:
             logger.warning(f"Could not fetch RSS cache for bootstrap: {e}")
             cached_articles = {}
 
+        failed_stmt = select(RuleHistory.monitored_id, RuleHistory.feed_id).where(
+            RuleHistory.outcome.in_([RuleOutcome.STALLED, RuleOutcome.FALSE_POSITIVE, RuleOutcome.REPLACED]),
+            RuleHistory.feed_id.isnot(None),
+        )
+        excluded_by_show: Dict[int, List[int]] = {}
+        for monitored_id, feed_id in self.session.exec(failed_stmt).all():
+            excluded_by_show.setdefault(monitored_id, []).append(feed_id)
+
         for show in unassigned_shows:
-            failed_stmt = select(RuleHistory.feed_id).where(
-                RuleHistory.monitored_id == show.id,
-                RuleHistory.outcome.in_([RuleOutcome.STALLED, RuleOutcome.FALSE_POSITIVE, RuleOutcome.REPLACED]),
-            )
-            excluded = [fid for fid in self.session.exec(failed_stmt).all() if fid is not None]
+            excluded = excluded_by_show.get(show.id, [])
 
             res = discover_feed_for_show(
                 monitored=show,
@@ -157,6 +176,8 @@ class Supervisor:
                 qbit_client=self.qbit,
                 excluded_feed_ids=excluded,
                 cached_articles_by_url=cached_articles,
+                rss_snapshot=rss_snapshot,
+                parsed_articles=parsed_articles,
             )
             if res:
                 chosen_feed, obs_group, matched_title = res
@@ -172,6 +193,7 @@ class Supervisor:
                         ratio_limit=self.settings.default_seed_ratio,
                         release_group=obs_group,
                         title_language=getattr(self.settings, "title_language", "english"),
+                        known_categories=known_categories,
                     )
                     show.current_feed_id = chosen_feed.id
                     show.qbit_rule_name = rule_name
@@ -211,6 +233,7 @@ class Supervisor:
                             ratio_limit=self.settings.default_seed_ratio,
                             release_group=None,
                             title_language=getattr(self.settings, "title_language", "english"),
+                            known_categories=known_categories,
                         )
                         show.current_feed_id = target_feed.id
                         show.qbit_rule_name = rule_name
@@ -291,11 +314,15 @@ class Supervisor:
                     show.season_year = data.get("season_year")
                     updated = True
 
-                current_aliases = set(show.aliases)
-                for a in data.get("aliases", []):
-                    if a and a.strip():
-                        current_aliases.add(a.strip())
-                show.aliases = list(current_aliases)
+                current_aliases = show.aliases
+                incoming_aliases = {
+                    alias.strip()
+                    for alias in data.get("aliases", [])
+                    if alias and alias.strip()
+                }
+                if not incoming_aliases.issubset(set(current_aliases)):
+                    show.aliases = list(set(current_aliases) | incoming_aliases)
+                    updated = True
 
                 is_finished = (data.get("status") == "FINISHED")
                 if is_finished and data.get("next_airing_episode") is None:
@@ -361,6 +388,7 @@ class Supervisor:
     def sync_active_rules(self) -> List[str]:
         """Ensure active rules in qBittorrent exist and have up-to-date definitions without redundant API calls."""
         logs = []
+        had_pending_changes = bool(self.session.new or self.session.dirty or self.session.deleted)
         active_shows = self.session.exec(
             select(Monitored).where(
                 Monitored.current_feed_id.is_not(None),
@@ -406,7 +434,8 @@ class Supervisor:
                 logger.warning(f"Could not refresh rule for '{show.display_name}': {e}")
                 logs.append(f"Warning: Failed updating rule for '{show.display_name}': {e}")
 
-        self.session.commit()
+        if had_pending_changes or refreshed > 0:
+            self.session.commit()
         if refreshed > 0:
             logs.append(f"Synchronized {refreshed} updated rules in qBittorrent.")
         return logs
@@ -536,6 +565,9 @@ class Supervisor:
     async def run_full_cycle(self) -> List[str]:
         """Execute one complete supervision iteration."""
         all_logs: List[str] = []
+        rss_snapshot = RssSnapshot(self.qbit)
+        parsed_articles: Dict[str, Dict[str, Any]] = {}
+        self._known_categories.clear()
 
         all_logs.extend(await asyncio.to_thread(self.sync_feeds))
 
@@ -543,15 +575,36 @@ class Supervisor:
 
         all_logs.extend(await asyncio.to_thread(self.prune_past_season_shows))
 
-        all_logs.extend(await asyncio.to_thread(self.bootstrap_unassigned_shows))
+        all_logs.extend(await asyncio.to_thread(
+            self.bootstrap_unassigned_shows,
+            rss_snapshot,
+            parsed_articles,
+            self._known_categories,
+        ))
 
-        all_logs.extend(await asyncio.to_thread(verify_and_confirm_torrents, self.session, self.qbit, self.settings))
+        all_logs.extend(await asyncio.to_thread(
+            verify_and_confirm_torrents,
+            self.session,
+            self.qbit,
+            self.settings,
+            rss_snapshot,
+            parsed_articles,
+            self._known_categories,
+        ))
 
         all_logs.extend(await asyncio.to_thread(self.reconcile_schedule_rollover))
 
         all_logs.extend(await asyncio.to_thread(self.sync_active_rules))
 
-        all_logs.extend(await asyncio.to_thread(check_and_handle_stalls, self.session, self.qbit, self.settings))
+        all_logs.extend(await asyncio.to_thread(
+            check_and_handle_stalls,
+            self.session,
+            self.qbit,
+            self.settings,
+            rss_snapshot,
+            parsed_articles,
+            self._known_categories,
+        ))
 
         total_shows = self.session.exec(select(Monitored)).all()
         now = utc_now()

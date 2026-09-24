@@ -3,7 +3,7 @@ import os
 import re
 from datetime import timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, utc_now
 
@@ -290,10 +290,12 @@ def create_or_update_rule(
     must_contain: Optional[str] = None,
     must_not_contain: Optional[str] = None,
     title_language: str = "english",
+    known_categories: Optional[Set[str]] = None,
 ) -> str:
     """Create or update a qBittorrent RSS rule and return the rule name."""
-    if category:
-        qbit_client.ensure_category_exists(category)
+    if category and (known_categories is None or category not in known_categories):
+        if qbit_client.ensure_category_exists(category) and known_categories is not None:
+            known_categories.add(category)
 
     rule_name = monitored.qbit_rule_name or build_rule_name(monitored.id or 0, monitored.display_name)
     rule_def = build_rule_definition(
@@ -311,12 +313,13 @@ def create_or_update_rule(
 
     qbit_client.set_rss_rule(rule_name=rule_name, rule_def=rule_def)
 
-    try:
-        matched = qbit_client.get_matching_articles(rule_name)
-        match_count = sum(len(v) for v in matched.values()) if isinstance(matched, dict) else 0
-        logger.debug(f"Rule '{rule_name}' sanity check: qBittorrent matched {match_count} article(s).")
-    except Exception as e:
-        logger.debug(f"Rule '{rule_name}' matching articles check skipped: {e}")
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            matched = qbit_client.get_matching_articles(rule_name)
+            match_count = sum(len(v) for v in matched.values()) if isinstance(matched, dict) else 0
+            logger.debug(f"Rule '{rule_name}' sanity check: qBittorrent matched {match_count} article(s).")
+        except Exception as e:
+            logger.debug(f"Rule '{rule_name}' matching articles check skipped: {e}")
 
     return rule_name
 

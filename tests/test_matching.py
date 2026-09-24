@@ -97,6 +97,22 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(p3["episode"], 9)
         self.assertEqual(p3["release_group"], "Erai-raws")
         self.assertEqual(p3["title"], "Koko wa Ore ni Makasete Saki ni Ike to Itte kara 10-nen ga Tattara Densetsu ni Natteita")
+    def test_match_release_uses_cycle_parsed_title_cache(self):
+        from unittest.mock import patch
+
+        cache = {}
+        title = "[SubsPlease] Sousou no Frieren - 08 (1080p).mkv"
+        aliases = ["Sousou no Frieren", "Frieren"]
+        with patch(
+            "qbit_seasonal_anime.core.matching.parse_release_title",
+            wraps=parse_release_title,
+        ) as parser:
+            first = match_release_to_show(title, aliases, parsed_cache=cache)
+            first[2]["title"] = "changed"
+            second = match_release_to_show(title, aliases, parsed_cache=cache)
+
+        self.assertEqual(parser.call_count, 1)
+        self.assertNotEqual(second[2]["title"], "changed")
 
 
 if __name__ == "__main__":
