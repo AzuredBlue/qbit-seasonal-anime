@@ -460,7 +460,6 @@ def verify_and_confirm_rules_from_feeds(
     ]
     torrents = _fetch_torrent_timestamps(qbit_client) if needs_torrent_evidence else []
 
-    unproven: List[str] = []
     for event in pending_events:
         rule_name = event["rule_name"]
         matched_title = event["matched_title"]
@@ -471,11 +470,10 @@ def verify_and_confirm_rules_from_feeds(
         )
 
         if live_at is None:
-            logger.info(
+            logger.debug(
                 f"Cached release '{matched_title}' for '{event['show_name']}' matched locally but was never "
                 f"accepted by qBittorrent — not recording it as a match."
             )
-            unproven.append(event["show_name"])
             continue
 
         record_match_event(
@@ -492,16 +490,6 @@ def verify_and_confirm_rules_from_feeds(
 
     if pending_events:
         session.commit()
-
-    if unproven:
-        # One summary per cycle: these shows have releases sitting in the feed cache
-        # that qBittorrent never accepted, so nothing is recorded for them.
-        names = list(dict.fromkeys(unproven))
-        summary = ", ".join(names[:4]) + (f" +{len(names) - 4} more" if len(names) > 4 else "")
-        logs.append(
-            f"Skipped {len(unproven)} cached release(s) with no qBittorrent acceptance "
-            f"(not recorded as matches): {summary}"
-        )
 
     return logs
 

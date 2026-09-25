@@ -120,9 +120,10 @@ class TestConfirmation(unittest.TestCase):
         mock_qbit.find_log_acceptances.return_value = {}
         mock_qbit.get_torrents.return_value = []
 
-        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        logs = verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
         self.session.refresh(self.show)
 
+        self.assertFalse(any("Skipped" in log for log in logs))
         self.assertEqual(self.session.exec(select(MatchHistory)).all(), [])
         # The supervisor still learns and repairs the rule from the release.
         self.assertEqual(self.show.status, MonitoredStatus.FIXED)
