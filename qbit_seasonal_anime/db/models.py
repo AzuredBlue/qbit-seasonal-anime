@@ -29,6 +29,15 @@ class MonitoredStatus(str, Enum):
     PAUSED = "paused"
 
 
+class EpisodeStatus(str, Enum):
+    WANTED = "wanted"
+    QUEUED = "queued"
+    DOWNLOADING = "downloading"
+    COMPLETED = "completed"
+    REPLACING = "replacing"
+    FAILED = "failed"
+
+
 class RuleOutcome(str, Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
@@ -102,6 +111,36 @@ class Monitored(SQLModel, table=True):
     @aliases.setter
     def aliases(self, val: List[str]) -> None:
         self.aliases_json = json.dumps(list(dict.fromkeys(val)))  # unique while preserving order
+
+
+class EpisodeNumberMapping(SQLModel, table=True):
+    __tablename__ = "episode_number_mappings"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    monitored_id: int = Field(foreign_key="monitored.id", ondelete="CASCADE", index=True)
+    feed_id: int = Field(foreign_key="feeds.id", ondelete="CASCADE", index=True)
+    offset: int = Field(default=0)
+    source: str = Field(default="inferred", index=True)
+    evidence_count: int = Field(default=0)
+    first_evidence_at: Optional[datetime] = Field(default=None, nullable=True)
+    last_evidence_at: Optional[datetime] = Field(default=None, nullable=True)
+    updated_at: datetime = Field(default_factory=utc_now, index=True)
+
+
+class Episode(SQLModel, table=True):
+    __tablename__ = "episodes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    monitored_id: int = Field(foreign_key="monitored.id", ondelete="CASCADE", index=True)
+    episode_number: int = Field(index=True)
+    status: EpisodeStatus = Field(default=EpisodeStatus.WANTED, index=True)
+    version: int = Field(default=1)
+    release_title: Optional[str] = Field(default=None, nullable=True)
+    release_group: Optional[str] = Field(default=None, nullable=True)
+    torrent_hash: Optional[str] = Field(default=None, nullable=True, index=True)
+    downloaded_at: Optional[datetime] = Field(default=None, nullable=True)
+    feed_id: Optional[int] = Field(default=None, foreign_key="feeds.id", ondelete="SET NULL", nullable=True, index=True)
+    source_episode: Optional[int] = Field(default=None, nullable=True, index=True)
 
 
 class RuleHistory(SQLModel, table=True):

@@ -12,7 +12,7 @@ from qbit_seasonal_anime.core.matching import (
 )
 from qbit_seasonal_anime.core.discovery import RssSnapshot, flatten_rss_articles
 from qbit_seasonal_anime.core.rules import create_or_update_rule, build_regex_pattern
-from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, Feed, MatchHistory, utc_now
+from qbit_seasonal_anime.db.models import Episode, EpisodeNumberMapping, EpisodeStatus, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, Feed, MatchHistory, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.confirmation")
 
@@ -67,6 +67,46 @@ def resolve_live_match_time(
         if isinstance(added_on, datetime) and _torrent_corresponds_to_article(name, article):
             return added_on
     return None
+
+
+def _episode_offset(session: Session, show: Monitored, feed_id: Optional[int]) -> Optional[int]:
+    if show.id is None or feed_id is None:
+        return None
+    try:
+        mapping = session.exec(
+            select(EpisodeNumberMapping).where(
+                EpisodeNumberMapping.monitored_id == show.id,
+                EpisodeNumberMapping.feed_id == feed_id,
+            )
+        ).first()
+    except Exception as e:
+        logger.debug(f"Could not read episode mapping for '{show.display_name}': {e}")
+        return None
+    if mapping is None:
+        return None
+    try:
+        return int(mapping.offset)
+    except (TypeError, ValueError):
+        return None
+
+
+def _canonical_episode(
+    session: Session,
+    show: Monitored,
+    feed_id: Optional[int],
+    raw_episode: Optional[int],
+) -> Optional[int]:
+    if raw_episode is None:
+        return None
+    offset = _episode_offset(session, show, feed_id)
+    if offset is None:
+        return raw_episode
+    local_episode = raw_episode - offset
+    if local_episode < 1:
+        return None
+    if show.total_episodes and local_episode > show.total_episodes:
+        return None
+    return local_episode
 
 
 def _fetch_torrent_timestamps(qbit_client: QBitClient) -> List[Tuple[str, datetime]]:
@@ -373,10 +413,6 @@ def verify_and_confirm_rules_from_feeds(
         best_parsed = candidate["best_parsed"]
         rule_name = candidate["rule_name"]
 
-        current_last = show.last_confirmed_episode or 0
-        if best_ep > current_last:
-            show.last_confirmed_episode = best_ep
-
         if best_parsed:
             if show.matched_title != best_parsed.get("title"):
                 show.matched_title = best_parsed.get("title")
@@ -425,6 +461,7 @@ def verify_and_confirm_rules_from_feeds(
             "show_id": show.id,
             "show_name": show.display_name,
             "feed_name": feed.qbit_feed_name,
+            "feed_id": feed.id,
             "rule_name": rule_name,
             "matched_title": matched_title,
             "best_art": candidate["best_art"],
@@ -461,6 +498,10 @@ def verify_and_confirm_rules_from_feeds(
     torrents = _fetch_torrent_timestamps(qbit_client) if needs_torrent_evidence else []
 
     for event in pending_events:
+        show = session.get(Monitored, event["show_id"])
+        if show is None:
+            continue
+
         rule_name = event["rule_name"]
         matched_title = event["matched_title"]
         live_at = resolve_live_match_time(
@@ -476,6 +517,42 @@ def verify_and_confirm_rules_from_feeds(
             )
             continue
 
+        canonical_episode = _canonical_episode(
+            session,
+            show,
+            event.get("feed_id"),
+            event["episode"],
+        )
+        if canonical_episode is None:
+            logger.debug(
+                f"Cached release '{matched_title}' for '{event['show_name']}' has an episode number outside "
+                f"the stored season mapping and was not recorded."
+            )
+            continue
+
+        current_episode = _canonical_episode(
+            session,
+            show,
+            event.get("feed_id"),
+            show.last_confirmed_episode,
+        )
+        if current_episode is None or canonical_episode > current_episode:
+            show.last_confirmed_episode = canonical_episode
+            session.add(show)
+
+        canonical_row = session.exec(
+            select(Episode).where(
+                Episode.monitored_id == event["show_id"],
+                Episode.episode_number == canonical_episode,
+            )
+        ).first()
+        if canonical_row:
+            canonical_row.status = EpisodeStatus.COMPLETED
+            canonical_row.source_episode = event["episode"]
+            canonical_row.release_title = matched_title
+            canonical_row.downloaded_at = live_at
+            session.add(canonical_row)
+
         record_match_event(
             session=session,
             monitored_id=event["show_id"],
@@ -483,7 +560,7 @@ def verify_and_confirm_rules_from_feeds(
             rule_name=rule_name,
             release_title=matched_title,
             feed_name=event["feed_name"],
-            episode=event["episode"],
+            episode=canonical_episode,
             match_time=live_at,
             matched_regex=event["matched_regex"],
         )
@@ -499,36 +576,42 @@ verify_and_confirm_torrents = verify_and_confirm_rules_from_feeds
 
 
 def has_downloaded_final_episode(session: Session, show: Monitored) -> bool:
-    """
-    Return True if the final episode of a show has been matched/downloaded by qBittorrent.
-    Checks:
-    1. show.total_episodes is known and positive.
-    2. show.last_confirmed_episode >= show.total_episodes, OR
-       match_history has a recorded match for episode >= show.total_episodes.
-    """
-    if not show.total_episodes or show.total_episodes <= 0:
+    if not show.total_episodes or show.total_episodes <= 0 or not show.id:
         return False
 
-    if (show.last_confirmed_episode or 0) >= show.total_episodes:
+    final_episode = session.exec(
+        select(Episode).where(
+            Episode.monitored_id == show.id,
+            Episode.episode_number == show.total_episodes,
+        )
+    ).first()
+    if final_episode and final_episode.status == EpisodeStatus.COMPLETED:
         return True
 
-    # Check match history by monitored_id or show_name
-    match_conditions = []
-    if show.id:
-        match_conditions.append(MatchHistory.monitored_id == show.id)
+    offset = _episode_offset(session, show, show.current_feed_id)
+    last_episode = show.last_confirmed_episode or 0
+    canonical_last = last_episode - offset if offset is not None else last_episode
+    if canonical_last == show.total_episodes:
+        return True
+
+    match_conditions = [MatchHistory.monitored_id == show.id]
     if show.display_name:
         match_conditions.append(MatchHistory.show_name == show.display_name)
 
-    if match_conditions:
-        mh = session.exec(
-            select(MatchHistory).where(
-                or_(*match_conditions),
-                MatchHistory.episode >= show.total_episodes,
-            )
-        ).first()
-        if mh:
-            show.last_confirmed_episode = max(show.last_confirmed_episode or 0, mh.episode or show.total_episodes)
+    history_rows = session.exec(
+        select(MatchHistory).where(or_(*match_conditions))
+    ).all()
+    for history in history_rows:
+        history_episode = history.episode
+        if history_episode is None:
+            continue
+        if offset is not None:
+            history_episode -= offset
+        if history_episode != show.total_episodes:
+            continue
+        if canonical_last < history_episode:
+            show.last_confirmed_episode = history_episode
             session.add(show)
-            return True
+        return True
 
     return False

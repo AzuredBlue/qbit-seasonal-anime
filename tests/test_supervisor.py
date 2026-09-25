@@ -55,8 +55,47 @@ async def test_supervisor_full_cycle():
 
     assert show.status == MonitoredStatus.FIXED
     assert show.current_feed_id is not None
-    assert show.last_confirmed_episode == 8
+    assert show.last_confirmed_episode is None
 
     hist = session.exec(select(RuleHistory)).all()
     assert len(hist) >= 1
     assert any(h.outcome == RuleOutcome.CONFIRMED for h in hist)
+
+
+@pytest.mark.asyncio
+async def test_anilist_reopens_stale_completed_show_when_finale_is_not_confirmed():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    session = Session(engine)
+
+    settings = Settings(id=1, anilist_username="TestUser", base_dir="/tmp/Anime")
+    show = Monitored(
+        id=1,
+        anilist_id=154587,
+        display_name="Sousou no Frieren",
+        aliases_json='["Sousou no Frieren"]',
+        status=MonitoredStatus.COMPLETED,
+        total_episodes=13,
+        next_airing_episode=12,
+        last_confirmed_episode=23,
+    )
+    session.add(settings)
+    session.add(show)
+    session.commit()
+
+    mock_anilist = MagicMock()
+    mock_anilist.fetch_user_seasonal_anime = AsyncMock(return_value=[{
+        "anilist_id": 154587,
+        "display_name": "Sousou no Frieren",
+        "status": "RELEASING",
+        "total_episodes": 13,
+        "next_airing_episode": 12,
+        "next_airing_at": None,
+    }])
+    supervisor = Supervisor(session=session, qbit=MagicMock(), anilist=mock_anilist, settings=settings)
+
+    await supervisor.sync_anilist_schedule()
+    session.refresh(show)
+
+    assert show.status == MonitoredStatus.FIXED
+    assert show.next_airing_episode == 12

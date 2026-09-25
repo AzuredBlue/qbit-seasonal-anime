@@ -4,8 +4,8 @@ import unittest
 from datetime import timedelta
 from unittest.mock import MagicMock
 from sqlmodel import Session, create_engine, SQLModel, select
-from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
-from qbit_seasonal_anime.db.models import Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
+from qbit_seasonal_anime.core.confirmation import has_downloaded_final_episode, verify_and_confirm_torrents
+from qbit_seasonal_anime.db.models import Episode, EpisodeNumberMapping, EpisodeStatus, Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
 
 STEEL_BALL_RUN_ALIASES = [
     "JoJo no Kimyou na Bouken: Steel Ball Run - 2nd - 3rd STAGE",
@@ -127,8 +127,55 @@ class TestConfirmation(unittest.TestCase):
         self.assertEqual(self.session.exec(select(MatchHistory)).all(), [])
         # The supervisor still learns and repairs the rule from the release.
         self.assertEqual(self.show.status, MonitoredStatus.FIXED)
-        self.assertEqual(self.show.last_confirmed_episode, 8)
+        self.assertIsNone(self.show.last_confirmed_episode)
         self.assertEqual(self.show.matched_title, "Sousou no Frieren")
+
+    def test_absolute_feed_number_is_mapped_before_completion(self):
+        self.show.total_episodes = 13
+        self.show.status = MonitoredStatus.COMPLETED
+        self.show.last_confirmed_episode = 23
+        self.session.add(EpisodeNumberMapping(monitored_id=1, feed_id=1, offset=11))
+        for episode_number in range(1, 14):
+            self.session.add(
+                Episode(
+                    monitored_id=1,
+                    episode_number=episode_number,
+                    status=EpisodeStatus.COMPLETED if episode_number < 13 else EpisodeStatus.WANTED,
+                )
+            )
+        self.session.commit()
+
+        self.assertFalse(has_downloaded_final_episode(self.session, self.show))
+
+        final_episode = self.session.exec(
+            select(Episode).where(
+                Episode.monitored_id == 1,
+                Episode.episode_number == 13,
+            )
+        ).first()
+        final_episode.status = EpisodeStatus.COMPLETED
+        self.session.add(final_episode)
+        self.session.commit()
+
+        self.assertTrue(has_downloaded_final_episode(self.session, self.show))
+
+    def test_live_absolute_release_updates_canonical_episode(self):
+        release_title = "[SubsPlease] Sousou no Frieren - 23 (1080p) [A03549C5].mkv"
+        self.show.total_episodes = 13
+        self.session.add(EpisodeNumberMapping(monitored_id=1, feed_id=1, offset=11))
+        mock_qbit = MagicMock()
+        self._frieren_feed(mock_qbit, release_title)
+        rule_name = "[Seasonal] Sousou no Frieren"
+        mock_qbit.find_log_acceptances.return_value = {
+            (rule_name, release_title): utc_now(),
+        }
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(self.show)
+
+        self.assertEqual(self.show.last_confirmed_episode, 12)
+        history = self.session.exec(select(MatchHistory)).first()
+        self.assertEqual(history.episode, 12)
 
     def test_history_row_falls_back_to_an_existing_torrent_when_log_rotated(self):
         mock_qbit = MagicMock()

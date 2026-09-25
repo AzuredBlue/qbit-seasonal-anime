@@ -359,6 +359,14 @@ class Supervisor:
                         show.next_airing_at = data.get("next_airing_at")
                         updated = True
 
+                if show.status == MonitoredStatus.COMPLETED and not has_downloaded_final_episode(self.session, show):
+                    show.status = (
+                        MonitoredStatus.FIXED
+                        if (show.last_confirmed_episode or 0) > 0
+                        else MonitoredStatus.UNCONFIRMED
+                    )
+                    updated = True
+
                 if updated:
                     self.session.add(show)
             else:
