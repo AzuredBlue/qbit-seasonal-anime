@@ -58,7 +58,7 @@ class TestConfirmation(unittest.TestCase):
         mock_received_time = utc_now()
         rule_name = "[Seasonal] Sousou no Frieren"
         release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
-        mock_qbit.get_rule_match_times.side_effect = lambda pairs: (
+        mock_qbit.find_log_acceptances.side_effect = lambda pairs: (
             call_order.append("lookup") or {(rule_name, release_title): mock_received_time}
         )
         mock_qbit.get_rss_items.return_value = {
@@ -84,47 +84,20 @@ class TestConfirmation(unittest.TestCase):
         self.assertEqual(self.show.last_confirmed_episode, 8)
         self.assertEqual(self.hist.outcome, RuleOutcome.CONFIRMED)
         self.assertTrue(any("Confirmed rule" in log for log in logs))
-        mock_qbit.get_rule_match_times.assert_called_once()
-        mock_qbit.get_rule_match_time.assert_not_called()
+        mock_qbit.find_log_acceptances.assert_called_once()
         self.assertEqual(call_order, ["rule", "lookup"])
 
+        # Recorded with qBittorrent's own acceptance time, not the article date.
         m_hist = self.session.exec(select(MatchHistory)).all()
         self.assertEqual(len(m_hist), 1)
         self.assertEqual(m_hist[0].release_title, "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv")
-        diff_sec = abs((utc_now().replace(tzinfo=None) - m_hist[0].created_at).total_seconds())
-        self.assertLess(diff_sec, 10)
-
-    def test_confirmation_falls_back_when_batch_api_is_unavailable(self):
-        mock_qbit = MagicMock()
-        rule_name = "[Seasonal] Sousou no Frieren"
-        release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
-        mock_qbit.get_rule_match_times = None
-        mock_qbit.get_rule_match_time.return_value = utc_now()
-        mock_qbit.get_rss_items.return_value = {
-            "SubsPlease": {
-                "url": "https://subsplease.org/rss/?r=1080",
-                "articles": [
-                    {
-                        "title": release_title,
-                        "torrentURL": "https://subs/8.torrent",
-                        "date": "03 Sep 2026 12:00:00 +0000",
-                    }
-                ],
-            }
-        }
-
-        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
-
-        self.assertIsNone(mock_qbit.get_rule_match_times)
-        mock_qbit.get_rule_match_time.assert_called_once_with(
-            rule_name=rule_name,
-            release_title=release_title,
+        self.assertAlmostEqual(
+            m_hist[0].created_at.replace(tzinfo=None),
+            mock_received_time.replace(tzinfo=None),
+            delta=timedelta(seconds=5),
         )
 
-    def test_confirmation_avoids_legacy_retry_storm_after_total_batch_failure(self):
-        mock_qbit = MagicMock()
-        release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
-        mock_qbit.get_rule_match_times.return_value = None
+    def _frieren_feed(self, mock_qbit, release_title):
         mock_qbit.get_rss_items.return_value = {
             "SubsPlease": {
                 "url": "https://subsplease.org/rss/?r=1080",
@@ -138,10 +111,62 @@ class TestConfirmation(unittest.TestCase):
             }
         }
 
+    def test_no_history_row_when_qbittorrent_never_accepted_the_release(self):
+        """A cached article our own fuzzy matcher likes is not proof of a download."""
+        mock_qbit = MagicMock()
+        release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
+        self._frieren_feed(mock_qbit, release_title)
+        # No log acceptance, and no torrent for it either.
+        mock_qbit.find_log_acceptances.return_value = {}
+        mock_qbit.get_torrents.return_value = []
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(self.show)
+
+        self.assertEqual(self.session.exec(select(MatchHistory)).all(), [])
+        # The supervisor still learns and repairs the rule from the release.
+        self.assertEqual(self.show.status, MonitoredStatus.FIXED)
+        self.assertEqual(self.show.last_confirmed_episode, 8)
+        self.assertEqual(self.show.matched_title, "Sousou no Frieren")
+
+    def test_history_row_falls_back_to_an_existing_torrent_when_log_rotated(self):
+        mock_qbit = MagicMock()
+        release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
+        self._frieren_feed(mock_qbit, release_title)
+        mock_qbit.find_log_acceptances.return_value = {}
+
+        added_on = utc_now() - timedelta(minutes=20)
+        # Torrent names get reordered after download, so match structurally.
+        renamed = MagicMock()
+        renamed.name = "Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
+        renamed.added_on = added_on.timestamp()
+        mock_qbit.get_torrents.return_value = [renamed]
+
         verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
 
-        mock_qbit.get_rule_match_times.assert_called_once()
-        mock_qbit.get_rule_match_time.assert_not_called()
+        m_hist = self.session.exec(select(MatchHistory)).all()
+        self.assertEqual(len(m_hist), 1)
+        self.assertAlmostEqual(
+            m_hist[0].created_at.replace(tzinfo=None),
+            added_on.replace(tzinfo=None),
+            delta=timedelta(seconds=5),
+        )
+
+    def test_unrelated_torrent_is_not_treated_as_evidence(self):
+        mock_qbit = MagicMock()
+        release_title = "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv"
+        self._frieren_feed(mock_qbit, release_title)
+        mock_qbit.find_log_acceptances.return_value = {}
+
+        # Same episode number, different show: must not count as this release.
+        other = MagicMock()
+        other.name = "Sousou no Frieren Movie - 08 (1080p) [DEADBEEF].mkv"
+        other.added_on = (utc_now() - timedelta(minutes=5)).timestamp()
+        mock_qbit.get_torrents.return_value = [other]
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+
+        self.assertEqual(self.session.exec(select(MatchHistory)).all(), [])
 
     def test_qbit_match_time_lookup_batches_log_and_rules_requests(self):
         from qbit_seasonal_anime.clients.qbit import QBitClient
@@ -216,8 +241,9 @@ class TestConfirmation(unittest.TestCase):
         self.session.commit()
 
         mock_qbit = MagicMock()
-        mock_qbit.get_rule_match_times.return_value = {}
-        released_at = utc_now() - timedelta(hours=2)
+        accepted_at = utc_now() - timedelta(hours=2)
+        mock_qbit.find_log_acceptances.side_effect = lambda pairs: {p: accepted_at for p in pairs}
+        released_at = accepted_at
         mock_qbit.get_rss_items.return_value = {
             "SubsPlease": {
                 "url": subsplease.qbit_feed_url,
@@ -392,7 +418,8 @@ class TestConfirmation(unittest.TestCase):
         self.session.commit()
 
         mock_qbit = MagicMock()
-        mock_qbit.get_rule_match_times.return_value = {}
+        accepted_at = utc_now() - timedelta(hours=2)
+        mock_qbit.find_log_acceptances.side_effect = lambda pairs: {p: accepted_at for p in pairs}
         mock_qbit.get_rss_items.return_value = {
             "Erai-raws": {
                 "url": "https://www.erai-raws.info/rss-1080p/",

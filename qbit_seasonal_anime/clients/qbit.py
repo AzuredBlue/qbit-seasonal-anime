@@ -156,6 +156,50 @@ class QBitClient:
         except Exception as e:
             raise QbitClientError(f"Failed to get torrents for category '{category}': {e}") from e
 
+    def get_torrents(self) -> List[Any]:
+        """Fetch every torrent in qBittorrent."""
+        client = self.get_client()
+        try:
+            return list(client.torrents_info())
+        except Exception as e:
+            raise QbitClientError(f"Failed to get torrents: {e}") from e
+
+    def find_log_acceptances(
+        self,
+        pairs: List[Tuple[str, str]],
+    ) -> Dict[Tuple[str, str], Optional[datetime]]:
+        """
+        Timestamps of articles qBittorrent's log reports it accepted for a rule.
+
+        Unlike get_rule_match_times this has no lastMatch fallback: lastMatch only
+        proves the rule matched *something*, not that it accepted this article, so it
+        must not be used as evidence that a specific release was downloaded.
+        """
+        result: Dict[Tuple[str, str], Optional[datetime]] = {pair: None for pair in dict.fromkeys(pairs)}
+        if not result:
+            return result
+
+        try:
+            client = self.get_client()
+            logs = list(reversed(list(client.log_main(last_known_id=-1))))
+        except Exception as e:
+            logger.debug(f"Could not search qBittorrent log for acceptances: {e}")
+            return result
+
+        for pair, _ in result.items():
+            rule_name, release_title = pair
+            for entry in logs:
+                msg = getattr(entry, "message", None)
+                if not isinstance(msg, str) or "is accepted by rule" not in msg or release_title not in msg:
+                    continue
+                try:
+                    result[pair] = datetime.fromtimestamp(entry.timestamp, tz=timezone.utc)
+                except Exception as e:
+                    logger.debug(f"Could not parse qBittorrent acceptance timestamp: {e}")
+                else:
+                    break
+        return result
+
     def get_matching_articles(self, rule_name: str) -> Dict[str, List[str]]:
         """Return articles currently matching a given rule."""
         client = self.get_client()

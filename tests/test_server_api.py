@@ -6,7 +6,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 from qbit_seasonal_anime.server import api as api_module
 from qbit_seasonal_anime.server.app import create_app
-from qbit_seasonal_anime.db.models import Monitored, Feed, MonitoredStatus, Settings
+from qbit_seasonal_anime.db.models import MatchHistory, Monitored, Feed, MonitoredStatus, Settings
 from qbit_seasonal_anime.server.api import get_db, get_qbit
 from qbit_seasonal_anime.db.session import init_db
 
@@ -477,7 +477,8 @@ def test_title_language_setting_switch(client, session):
     assert s_en["display_name"] == "The Apothecary Diaries"
 
 
-def test_get_show_rule_auto_confirms_when_matching_article_present(client, session, mock_qbit):
+def test_get_show_rule_is_read_only_when_a_article_matches(client, session, mock_qbit):
+    """Opening the rule modal must not confirm shows, write rules, or record history."""
     feed = Feed(id=2, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss", priority=1)
     show = Monitored(
         anilist_id=6001,
@@ -512,32 +513,92 @@ def test_get_show_rule_auto_confirms_when_matching_article_present(client, sessi
     res = client.get(f"/api/shows/{show.id}/rule")
     assert res.status_code == 200
     data = res.json()
-    assert data["status"] == "fixed"
+    # The article is still reported as currently matching...
     assert len(data["matched_articles"]) == 1
+    assert data["history_articles"] == []
 
+    # ...but nothing was mutated and no match was invented from the cache.
     session.expire_all()
     updated_show = session.get(Monitored, show.id)
-    assert updated_show.status == MonitoredStatus.FIXED
-    assert updated_show.last_confirmed_episode == 22
-    assert updated_show.matched_release_group == "SubsPlease"
+    assert updated_show.status == MonitoredStatus.UNCONFIRMED
+    assert updated_show.last_confirmed_episode is None
+    assert updated_show.matched_title is None
+    mock_qbit.set_rss_rule.assert_not_called()
+    assert client.get("/api/history").json() == []
 
-    hist_res = client.get("/api/history")
-    assert hist_res.status_code == 200
-    hist_data = hist_res.json()
+
+def test_rule_details_separates_live_matches_from_recorded_history(client, session, mock_qbit):
+    feed = Feed(id=3, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=6002,
+        display_name="Yomi no Tsugai",
+        aliases_json='["Yomi no Tsugai"]',
+        status=MonitoredStatus.FIXED,
+        current_feed_id=feed.id,
+        qbit_rule_name="[Seasonal] Yomi no Tsugai",
+        matched_title="Yomi no Tsugai",
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+    session.add(MatchHistory(
+        monitored_id=show.id,
+        show_name=show.display_name,
+        rule_name=show.qbit_rule_name,
+        release_title="[SubsPlease] Yomi no Tsugai - 21 (1080p) [OLD].mkv",
+        episode=21,
+    ))
+    session.commit()
+
+    mock_qbit.get_rss_rules.return_value = {"[Seasonal] Yomi no Tsugai": {"enabled": True, "mustContain": "Yomi no Tsugai"}}
+    mock_qbit.get_matching_articles.return_value = {
+        "https://subsplease.org/rss": ["[SubsPlease] Yomi no Tsugai - 22 (1080p) [NEW].mkv"]
+    }
+
+    data = client.get(f"/api/shows/{show.id}/rule").json()
+    assert data["matched_articles"] == ["[SubsPlease] Yomi no Tsugai - 22 (1080p) [NEW].mkv"]
+    assert data["history_articles"] == ["[SubsPlease] Yomi no Tsugai - 21 (1080p) [OLD].mkv"]
+
+    # A release that is both currently matching and already recorded shows up in both.
+    session.add(MatchHistory(
+        monitored_id=show.id,
+        show_name=show.display_name,
+        rule_name=show.qbit_rule_name,
+        release_title="[SubsPlease] Yomi no Tsugai - 22 (1080p) [NEW].mkv",
+        episode=22,
+    ))
+    session.commit()
+
+    data = client.get(f"/api/shows/{show.id}/rule").json()
+    assert data["matched_articles"] == ["[SubsPlease] Yomi no Tsugai - 22 (1080p) [NEW].mkv"]
+    assert data["history_articles"] == [
+        "[SubsPlease] Yomi no Tsugai - 22 (1080p) [NEW].mkv",
+        "[SubsPlease] Yomi no Tsugai - 21 (1080p) [OLD].mkv",
+    ]
+
+
+def test_history_endpoint_and_delete_still_work(client, session, mock_qbit):
+    show = Monitored(anilist_id=6003, display_name="History Show", aliases_json='["History Show"]')
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+    session.add(MatchHistory(
+        monitored_id=show.id,
+        show_name=show.display_name,
+        rule_name="[Seasonal] History Show",
+        release_title="[SubsPlease] History Show - 01 (1080p).mkv",
+        episode=1,
+    ))
+    session.commit()
+
+    hist_data = client.get("/api/history").json()
     assert len(hist_data) == 1
-    assert hist_data[0]["show_name"] == "Yomi no Tsugai"
-    assert hist_data[0]["episode"] == 22
-    assert "Yomi no Tsugai - 22" in hist_data[0]["release_title"]
-
-    from datetime import datetime, timezone
-    created_dt = datetime.fromisoformat(hist_data[0]["created_at"])
-    now_dt = datetime.now(timezone.utc)
-    assert abs((now_dt - created_dt).total_seconds()) < 10
+    assert hist_data[0]["episode"] == 1
 
     del_res = client.delete("/api/history")
     assert del_res.status_code == 200
-    hist_after = client.get("/api/history").json()
-    assert len(hist_after) == 0
+    assert client.get("/api/history").json() == []
 
 
 

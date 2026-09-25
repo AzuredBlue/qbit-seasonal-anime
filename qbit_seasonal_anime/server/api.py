@@ -197,6 +197,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
 
     qbit_rule_data = {}
     matched_articles = []
+    history_articles: List[str] = []
     if show.qbit_rule_name:
         try:
             qrules = qbit.get_rss_rules()
@@ -265,114 +266,11 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         hist_records = session.exec(
             select(MatchHistory)
             .where(MatchHistory.monitored_id == show.id)
-            .order_by(MatchHistory.episode.desc())
+            .order_by(MatchHistory.created_at.desc())
         ).all()
-        for hr in hist_records:
-            if hr.release_title and hr.release_title not in matched_articles:
-                matched_articles.append(hr.release_title)
-
-    if show.status == MonitoredStatus.UNCONFIRMED and matched_articles and feed:
-        aliases = show.aliases
-        test_pattern = build_regex_pattern(aliases)
-        prepared_aliases = prepare_aliases(aliases)
-        parsed_articles = {}
-        best_ep = None
-        best_title = None
-        best_parsed = None
-        for title in matched_articles:
-            is_match, _, parsed = match_release_to_show(
-                title,
-                aliases,
-                test_pattern=test_pattern,
-                prepared_aliases=prepared_aliases,
-                parsed_cache=parsed_articles,
-            )
-            if is_match:
-                ep = parsed.get("episode")
-                if ep is not None:
-                    if best_ep is None or ep > best_ep:
-                        best_ep = ep
-                        best_title = title
-                        best_parsed = parsed
-
-        if best_ep is not None and best_parsed:
-            show.last_confirmed_episode = max(show.last_confirmed_episode or 0, best_ep)
-            show.matched_title = best_parsed.get("title")
-            show.matched_release_group = best_parsed.get("release_group")
-            show.status = MonitoredStatus.FIXED
-
-            hist_stmt = (
-                select(RuleHistory)
-                .where(RuleHistory.monitored_id == show.id)
-                .order_by(RuleHistory.created_at.desc())
-                .limit(1)
-            )
-            latest_hist = session.exec(hist_stmt).first()
-            if latest_hist and latest_hist.outcome == RuleOutcome.PENDING:
-                latest_hist.outcome = RuleOutcome.CONFIRMED
-                latest_hist.note = f"Verified with RSS release: {best_title}"
-                session.add(latest_hist)
-
-            from qbit_seasonal_anime.core.rules import create_or_update_rule
-            try:
-                create_or_update_rule(
-                    qbit_client=qbit,
-                    monitored=show,
-                    feed=feed,
-                    base_dir=settings.base_dir,
-                    category=settings.default_category,
-                    ratio_limit=settings.default_seed_ratio,
-                    release_group=show.matched_release_group,
-                )
-            except Exception as e:
-                state.add_log(f"Warning tightening rule in qBittorrent: {e}", "WARNING")
-
-            rule_name = show.qbit_rule_name or f"[Seasonal] {show.display_name}"
-            match_time = None
-            try:
-                match_time = qbit.get_rule_match_time(
-                    rule_name=rule_name,
-                    release_title=best_title,
-                )
-            except Exception:
-                pass
-
-            if not isinstance(match_time, datetime):
-                match_time = None
-
-            if not match_time and feed_items:
-                best_item = next((it for it in feed_items if isinstance(it, dict) and it.get("title") == best_title), None)
-                if best_item:
-                    from qbit_seasonal_anime.core.discovery import parse_article_date
-                    art_dt = parse_article_date(best_item)
-                    if art_dt and art_dt.year > 2000:
-                        match_time = art_dt
-
-            if not match_time:
-                match_time = utc_now()
-
-            regex_pat = qbit_rule_data.get("mustContain") or show.custom_regex or build_regex_pattern(
-                show.aliases,
-                matched_title=show.matched_title,
-                release_group=show.matched_release_group,
-            )
-
-            from qbit_seasonal_anime.core.confirmation import record_match_event
-            record_match_event(
-                session=session,
-                monitored_id=show.id,
-                show_name=show.display_name,
-                rule_name=rule_name,
-                release_title=best_title,
-                feed_name=feed.qbit_feed_name if feed else None,
-                episode=best_ep,
-                match_time=match_time,
-                matched_regex=regex_pat,
-            )
-
-            session.add(show)
-            session.commit()
-            state.add_log(f"Auto-confirmed rule for '{show.display_name}' (Ep {best_ep}) via '{best_title}' -> Works", "INFO")
+        # Deliberately not de-duplicated against matched_articles: a release can be
+        # both currently matching and already recorded, and both facts are useful.
+        history_articles = [hr.release_title for hr in hist_records if hr.release_title]
 
 
     prefer_english = (getattr(settings, "title_language", "english") == "english")
@@ -411,6 +309,7 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         "matched_title": show.matched_title,
         "matched_release_group": show.matched_release_group,
         "matched_articles": matched_articles[:15],
+        "history_articles": history_articles[:15],
         "has_learned_pattern": has_learned_pattern,
         "is_upcoming": is_upcoming,
         "feed_pinned": bool(show.feed_pinned),

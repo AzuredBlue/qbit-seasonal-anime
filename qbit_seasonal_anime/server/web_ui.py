@@ -1047,11 +1047,13 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
 
         const countMatched = (data.matched_articles || []).length;
         const matchCountLabel = countMatched === 1 ? '1 match' : `${countMatched} matches`;
-        const articlesHtml = (data.matched_articles && data.matched_articles.length > 0)
-          ? data.matched_articles.map(a => `
+        const listRows = (items, emptyText) => (items && items.length > 0)
+          ? items.map(a => `
               <li class="text-[11px] font-mono text-zinc-400 py-1.5 border-t border-[#1c1c22] first:border-t-0 first:pt-0 truncate select-all" title="${escapeHtml(a)}">${escapeHtml(a)}</li>
             `).join('')
-          : '<li class="text-[11px] font-mono text-zinc-600 py-1.5">No cached RSS articles currently match this rule pattern.</li>';
+          : `<li class="text-[11px] font-mono text-zinc-600 py-1.5">${emptyText}</li>`;
+        const articlesHtml = listRows(data.matched_articles, 'No cached RSS articles currently match this rule pattern.');
+        const historyHtml = listRows(data.history_articles, 'No matches have been accepted by qBittorrent yet.');
 
         const candidateBanner = data.candidate_feed_id ? `
           <p class="text-[11px] text-zinc-500 leading-snug">Watching <span class="text-zinc-300">${escapeHtml(data.candidate_feed_name || 'another feed')}</span> — a release for this show appeared there but not on the preferred feed. The rule moves automatically if that stays true for 5 minutes.</p>
@@ -1088,11 +1090,21 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
         const articlesSection = (data.has_rule && data.has_learned_pattern) ? `
           <div class="space-y-1 pt-0.5">
             <div class="flex items-baseline justify-between gap-2">
-              <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Live Matching Articles in RSS Feed</span>
+              <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Currently Matching in RSS Feed</span>
               <span class="text-[11px] font-mono text-zinc-500">${matchCountLabel}</span>
             </div>
             <ul class="bg-[#121215] border border-[#2e2e38] rounded-lg px-3 py-2 max-h-24 overflow-y-auto">
               ${articlesHtml}
+            </ul>
+          </div>
+
+          <div class="space-y-1 pt-0.5">
+            <div class="flex items-baseline justify-between gap-2">
+              <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Accepted by qBittorrent</span>
+              <span class="text-[11px] font-mono text-zinc-600">recorded</span>
+            </div>
+            <ul class="bg-[#121215] border border-[#2e2e38] rounded-lg px-3 py-2 max-h-24 overflow-y-auto">
+              ${historyHtml}
             </ul>
           </div>
         ` : '';

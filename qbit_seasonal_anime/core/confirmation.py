@@ -2,13 +2,95 @@ from datetime import datetime, timezone
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlmodel import Session, select, or_
+from rapidfuzz import fuzz
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
-from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
-from qbit_seasonal_anime.core.discovery import RssSnapshot, flatten_rss_articles, parse_article_date
+from qbit_seasonal_anime.core.matching import (
+    match_release_to_show,
+    normalize_title,
+    parse_release_title,
+    prepare_aliases,
+)
+from qbit_seasonal_anime.core.discovery import RssSnapshot, flatten_rss_articles
 from qbit_seasonal_anime.core.rules import create_or_update_rule, build_regex_pattern
 from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, Feed, MatchHistory, utc_now
 
 logger = logging.getLogger("qbit_seasonal_anime.core.confirmation")
+
+
+LIVE_TORRENT_MIN_SCORE = 95.0
+
+
+def _torrent_corresponds_to_article(torrent_name: str, article: Dict[str, Any]) -> bool:
+    """
+    Whether an existing qBittorrent torrent is the same release as a feed article.
+
+    Torrent names get reordered or renamed after download (e.g. "X: Steel Ball Run - 02"
+    becomes "X - Steel Ball Run - 02"), so compare structurally instead of by substring:
+    same episode, compatible release group, and near-identical parsed titles.
+
+    token_sort_ratio, not token_set_ratio: the latter scores a subset as 100, so
+    "Sousou no Frieren Movie" would look identical to "Sousou no Frieren".
+    """
+    parsed = parse_release_title(torrent_name)
+    if parsed.get("episode") is None or parsed.get("episode") != article.get("episode"):
+        return False
+
+    torrent_group = parsed.get("release_group")
+    article_group = article.get("release_group")
+    if torrent_group and article_group and torrent_group != article_group:
+        return False
+
+    normalised = normalize_title(parsed.get("title", ""))
+    reference = normalize_title(article.get("title", ""))
+    if not normalised or not reference:
+        return False
+    return float(fuzz.token_sort_ratio(normalised, reference)) >= LIVE_TORRENT_MIN_SCORE
+
+
+def resolve_live_match_time(
+    article: Optional[Dict[str, Any]],
+    log_time: Optional[datetime],
+    torrents: Optional[List[Tuple[str, datetime]]],
+) -> Optional[datetime]:
+    """
+    When qBittorrent actually acted on a release, or None if it only ever sat in the cache.
+
+    A cached article that the app's own fuzzy matcher likes proves nothing: qBittorrent
+    may have had no rule yet, or its pattern never accepted that article. Only its own
+    "accepted by rule" log line, or a torrent that exists for the release, is evidence.
+    """
+    if isinstance(log_time, datetime):
+        return log_time
+    if not article or not torrents:
+        return None
+    for name, added_on in torrents:
+        if isinstance(added_on, datetime) and _torrent_corresponds_to_article(name, article):
+            return added_on
+    return None
+
+
+def _fetch_torrent_timestamps(qbit_client: QBitClient) -> List[Tuple[str, datetime]]:
+    """(name, added_on) for every torrent, used as download evidence."""
+    getter = getattr(qbit_client, "get_torrents", None)
+    if not callable(getter):
+        return []
+    try:
+        torrents = getter()
+    except QbitClientError as e:
+        logger.debug(f"Could not read qBittorrent torrents for match evidence: {e}")
+        return []
+
+    result: List[Tuple[str, datetime]] = []
+    for torrent in torrents or []:
+        name = getattr(torrent, "name", None)
+        added_on = getattr(torrent, "added_on", None)
+        if not name or added_on is None:
+            continue
+        try:
+            result.append((str(name), datetime.fromtimestamp(float(added_on), tz=timezone.utc)))
+        except (TypeError, ValueError, OSError):
+            continue
+    return result
 
 
 def record_match_event(
@@ -346,6 +428,7 @@ def verify_and_confirm_rules_from_feeds(
             "rule_name": rule_name,
             "matched_title": matched_title,
             "best_art": candidate["best_art"],
+            "best_parsed": candidate["best_parsed"],
             "episode": best_ep,
             "matched_regex": regex_pat,
         })
@@ -357,43 +440,43 @@ def verify_and_confirm_rules_from_feeds(
         for event in pending_events
         if event["matched_title"]
     ]
-    match_times = {}
-    batch_lookup_available = False
+
+    # Evidence that qBittorrent actually accepted each release, not just that our own
+    # fuzzy matcher liked a cached article.
+    log_acceptances: Dict[Tuple[str, str], Optional[datetime]] = {}
     if match_pairs:
-        try:
-            batch_lookup = getattr(qbit_client, "get_rule_match_times", None)
-            if callable(batch_lookup):
-                batch_lookup_available = True
-                batch_result = batch_lookup(match_pairs)
-                if isinstance(batch_result, dict):
-                    match_times = batch_result
-        except Exception as e:
-            logger.debug(f"Could not batch qBittorrent match-time lookup: {e}")
-
-    if match_pairs and not batch_lookup_available:
-        for rule_name, release_title in match_pairs:
+        lookup = getattr(qbit_client, "find_log_acceptances", None)
+        if callable(lookup):
             try:
-                match_times[(rule_name, release_title)] = qbit_client.get_rule_match_time(
-                    rule_name=rule_name,
-                    release_title=release_title,
-                )
-            except Exception:
-                match_times[(rule_name, release_title)] = None
+                found = lookup(match_pairs)
+                if isinstance(found, dict):
+                    log_acceptances = found
+            except Exception as e:
+                logger.debug(f"Could not look up qBittorrent acceptances: {e}")
 
+    needs_torrent_evidence = [
+        pair for pair in match_pairs
+        if not isinstance(log_acceptances.get(pair), datetime)
+    ]
+    torrents = _fetch_torrent_timestamps(qbit_client) if needs_torrent_evidence else []
+
+    unproven: List[str] = []
     for event in pending_events:
         rule_name = event["rule_name"]
         matched_title = event["matched_title"]
-        match_time = match_times.get((rule_name, matched_title))
-        if not isinstance(match_time, datetime):
-            match_time = None
+        live_at = resolve_live_match_time(
+            event.get("best_parsed"),
+            log_acceptances.get((rule_name, matched_title)),
+            torrents,
+        )
 
-        if not match_time and event["best_art"]:
-            art_dt = parse_article_date(event["best_art"])
-            if art_dt and art_dt.year > 2000:
-                match_time = art_dt
-
-        if not match_time:
-            match_time = utc_now()
+        if live_at is None:
+            logger.info(
+                f"Cached release '{matched_title}' for '{event['show_name']}' matched locally but was never "
+                f"accepted by qBittorrent — not recording it as a match."
+            )
+            unproven.append(event["show_name"])
+            continue
 
         record_match_event(
             session=session,
@@ -403,12 +486,23 @@ def verify_and_confirm_rules_from_feeds(
             release_title=matched_title,
             feed_name=event["feed_name"],
             episode=event["episode"],
-            match_time=match_time,
+            match_time=live_at,
             matched_regex=event["matched_regex"],
         )
 
     if pending_events:
         session.commit()
+
+    if unproven:
+        # One summary per cycle: these shows have releases sitting in the feed cache
+        # that qBittorrent never accepted, so nothing is recorded for them.
+        names = list(dict.fromkeys(unproven))
+        summary = ", ".join(names[:4]) + (f" +{len(names) - 4} more" if len(names) > 4 else "")
+        logs.append(
+            f"Skipped {len(unproven)} cached release(s) with no qBittorrent acceptance "
+            f"(not recorded as matches): {summary}"
+        )
+
     return logs
 
 
