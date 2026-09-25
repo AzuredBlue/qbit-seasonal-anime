@@ -54,6 +54,21 @@ def test_torrent_lookup_and_lifecycle_methods_delegate_to_client():
     underlying.torrents_delete.assert_called_once_with(delete_files=True, torrent_hashes=["abc"])
 
 
+def test_refresh_rss_reports_request_acceptance():
+    client, underlying = _client()
+
+    assert client.refresh_rss_feeds() is True
+
+    underlying.rss_refresh_item.assert_called_once_with(item_path="")
+
+
+def test_refresh_rss_reports_request_failure():
+    client, underlying = _client()
+    underlying.rss_refresh_item.side_effect = RuntimeError("refresh failed")
+
+    assert client.refresh_rss_feeds() is False
+
+
 def test_get_client_retries_transient_connection_failure():
     connected_client = MagicMock()
     client_factory = MagicMock(side_effect=[ConnectionError("starting"), connected_client])

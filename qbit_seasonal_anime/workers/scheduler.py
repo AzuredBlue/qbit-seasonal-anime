@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.clients.qbit import QBitClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
-from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus, utc_now
+from qbit_seasonal_anime.db.models import Episode, EpisodeStatus, Monitored, MonitoredStatus, utc_now
 from qbit_seasonal_anime.db.session import get_engine, get_settings
 
 logger = logging.getLogger("qbit_seasonal_anime.workers.scheduler")
@@ -22,7 +22,7 @@ def calculate_next_poll_interval(
 ) -> Tuple[int, str]:
     """
     Dynamically calculate the optimal sleep duration until the next check:
-    - Shows whose RSS rules already work (FIXED) are ignored, as qBittorrent downloads them automatically.
+    - FIXED shows are ignored in Rules mode, but Direct mode keeps hunting while the latest aired episode is WANTED.
     - Shows without release dates (next_airing_at is None) are ignored from hunting; they wait for AniList schedule.
     - If any upcoming/unconfirmed show has aired recently (next_airing_at <= now) -> Hunting mode (qBittorrent RSS refresh rate + 15s).
     - If the next upcoming unconfirmed show airs sooner than default interval -> Sleep until its TV air time to bind rule.
@@ -43,12 +43,33 @@ def calculate_next_poll_interval(
     unresolved_upcoming = []
 
     for s in shows:
-        if s.status in (MonitoredStatus.PAUSED, MonitoredStatus.COMPLETED, MonitoredStatus.FIXED):
-            continue
-
         airing_at = s.next_airing_at
         if airing_at and airing_at.tzinfo is None:
             airing_at = airing_at.replace(tzinfo=timezone.utc)
+
+        if s.status in (MonitoredStatus.PAUSED, MonitoredStatus.COMPLETED):
+            continue
+
+        if s.status == MonitoredStatus.FIXED:
+            if not is_direct or airing_at is None or s.id is None or s.next_airing_episode is None:
+                continue
+            latest_aired_episode = (
+                s.next_airing_episode
+                if airing_at <= now
+                else max(0, s.next_airing_episode - 1)
+            )
+            if latest_aired_episode < 1:
+                continue
+            wanted_episode = session.exec(
+                select(Episode.id).where(
+                    Episode.monitored_id == s.id,
+                    Episode.status == EpisodeStatus.WANTED,
+                    Episode.episode_number == latest_aired_episode,
+                ).limit(1)
+            ).first()
+            if wanted_episode is not None:
+                hunting_shows.append(s)
+            continue
 
         if airing_at is None:
             continue

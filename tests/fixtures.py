@@ -1,6 +1,8 @@
 MOCK_QBIT_RSS_ITEMS = {
     "SubsPlease": {
         "url": "https://subsplease.org/rss/?r=1080",
+        "isLoading": False,
+        "hasError": False,
         "articles": [
             {
                 "id": "1",
@@ -16,6 +18,8 @@ MOCK_QBIT_RSS_ITEMS = {
     },
     "Erai-raws": {
         "url": "https://www.erai-raws.info/rss-1080p/",
+        "isLoading": False,
+        "hasError": False,
         "articles": [
             {
                 "id": "3",

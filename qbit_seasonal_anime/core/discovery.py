@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 import logging
+import time
 from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional, Tuple
-from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
+from qbit_seasonal_anime.clients.qbit import QBitClient, QbitAuthenticationError, QbitClientError, QbitRSSRefreshError
 from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
 from qbit_seasonal_anime.core.rules import build_regex_pattern
 from qbit_seasonal_anime.db.models import Feed, Monitored
@@ -49,6 +50,26 @@ def flatten_rss_articles(rss_tree: Dict[str, Any]) -> Dict[str, List[Dict[str, A
     return feed_articles
 
 
+def _rss_feed_states(rss_tree: Dict[str, Any]) -> List[Tuple[str, bool, bool]]:
+    states: List[Tuple[str, bool, bool]] = []
+
+    def traverse(node: Dict[str, Any]) -> None:
+        for name, value in node.items():
+            if not isinstance(value, dict):
+                continue
+            if "url" in value:
+                if "isLoading" not in value or "hasError" not in value:
+                    raise QbitRSSRefreshError(
+                        f"qBittorrent did not report refresh state for RSS feed '{name}'"
+                    )
+                states.append((name, bool(value["isLoading"]), bool(value["hasError"])))
+            else:
+                traverse(value)
+
+    traverse(rss_tree)
+    return states
+
+
 class RssSnapshot:
     def __init__(self, qbit_client: QBitClient):
         self.qbit_client = qbit_client
@@ -78,11 +99,71 @@ class RssSnapshot:
         self._load_error = None
         self._load_attempted = False
 
-    def refresh(self) -> Dict[str, List[Dict[str, Any]]]:
+    def _wait_for_settled_feeds(
+        self,
+        deadline: float,
+        poll_interval_seconds: float,
+    ) -> Tuple[Dict[str, Any], List[Tuple[str, bool, bool]]]:
+        while True:
+            if time.monotonic() >= deadline:
+                raise QbitRSSRefreshError("Timed out waiting for qBittorrent RSS feeds to finish refreshing")
+            if poll_interval_seconds > 0:
+                time.sleep(poll_interval_seconds)
+            rss_tree = self.qbit_client.get_rss_items(with_data=True)
+            states = _rss_feed_states(rss_tree)
+            if not any(loading for _, loading, _ in states):
+                return rss_tree, states
+
+    def refresh(
+        self,
+        *,
+        max_attempts: int = 3,
+        poll_interval_seconds: float = 0.5,
+        timeout_seconds: float = 10.0,
+    ) -> Dict[str, List[Dict[str, Any]]]:
         self.invalidate()
-        self.qbit_client.refresh_rss_feeds()
-        rss_tree = self.qbit_client.get_rss_items(with_data=True)
-        return flatten_rss_articles(rss_tree)
+        attempts = max(1, max_attempts)
+        poll_interval = max(0.0, poll_interval_seconds)
+        timeout = max(0.0, timeout_seconds)
+        last_error: Optional[Exception] = None
+
+        for attempt in range(attempts):
+            deadline = time.monotonic() + timeout
+            try:
+                rss_tree = self.qbit_client.get_rss_items(with_data=True)
+                states = _rss_feed_states(rss_tree)
+                if any(loading for _, loading, _ in states):
+                    rss_tree, states = self._wait_for_settled_feeds(deadline, poll_interval)
+
+                if not self.qbit_client.refresh_rss_feeds():
+                    raise QbitRSSRefreshError("qBittorrent rejected the RSS refresh request")
+
+                rss_tree, states = self._wait_for_settled_feeds(deadline, poll_interval)
+                failed_feeds = [name for name, _, has_error in states if has_error]
+                if failed_feeds:
+                    raise QbitRSSRefreshError(
+                        f"qBittorrent RSS refresh failed for: {', '.join(failed_feeds)}"
+                    )
+
+                articles = flatten_rss_articles(rss_tree)
+                self._articles_by_url = articles
+                self._load_error = None
+                self._load_attempted = True
+                return articles
+            except QbitAuthenticationError:
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt + 1 < attempts and poll_interval > 0:
+                    time.sleep(poll_interval)
+
+        error = QbitRSSRefreshError(
+            f"Failed to refresh qBittorrent RSS feeds after {attempts} attempts: {last_error}"
+        )
+        self._articles_by_url = {}
+        self._load_error = error
+        self._load_attempted = True
+        raise error from last_error
 
 
 def discover_feed_for_show(

@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 import asyncio
 import importlib
 import pytest
@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import inspect
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
-from qbit_seasonal_anime.clients.qbit import QbitConnectionError
+from qbit_seasonal_anime.clients.qbit import QbitConnectionError, QbitRSSRefreshError
 app_module = importlib.import_module("qbit_seasonal_anime.server.app")
 from qbit_seasonal_anime.server import api as api_module
 from qbit_seasonal_anime.server.app import create_app
@@ -350,7 +350,7 @@ async def test_background_supervisor_retries_before_running_cycle(monkeypatch):
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(Settings(id=1, qbit_host="http://qbit:8080"))
+        session.add(Settings(id=1, qbit_host="http://qbit:8080", download_mode="direct"))
         session.commit()
 
     events = []
@@ -362,8 +362,8 @@ async def test_background_supervisor_retries_before_running_cycle(monkeypatch):
             raise QbitConnectionError("starting")
         return {"app_version": "test", "api_version": "test"}
 
-    async def run_cycle():
-        events.append("cycle")
+    async def run_cycle(*, force_rss_refresh=False):
+        events.append(f"cycle:{force_rss_refresh}")
         return []
 
     qbit.test_connection.side_effect = probe
@@ -382,11 +382,84 @@ async def test_background_supervisor_retries_before_running_cycle(monkeypatch):
     monkeypatch.setattr(app_module.asyncio, "wait_for", stop_wait)
     await app_module.background_supervisor_task()
 
-    assert events == ["probe", "probe", "cycle", "probe"]
+    assert events == ["probe", "probe", "cycle:True", "probe"]
     assert qbit.test_connection.call_count == 3
-    supervisor.run_full_cycle.assert_awaited_once_with()
+    supervisor.run_full_cycle.assert_awaited_once_with(force_rss_refresh=True)
     assert app_module.state.next_check_seconds == 60
     assert app_module.state.next_check_reason == "normal"
+
+
+@pytest.mark.asyncio
+async def test_background_supervisor_forces_rss_refresh_only_on_first_healthy_cycle(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Settings(id=1, qbit_host="http://qbit:8080", download_mode="direct"))
+        session.commit()
+
+    qbit = MagicMock()
+    qbit.test_connection.return_value = {"app_version": "test", "api_version": "test"}
+    supervisor = MagicMock()
+    supervisor.run_full_cycle = AsyncMock(return_value=[])
+    monkeypatch.setattr(app_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(app_module, "QBitClient", MagicMock(return_value=qbit))
+    monkeypatch.setattr(app_module, "Supervisor", MagicMock(return_value=supervisor))
+    monkeypatch.setattr(app_module, "calculate_next_poll_interval", MagicMock(return_value=(60, "normal")))
+
+    wait_calls = 0
+
+    async def stop_after_second_cycle(awaitable, *args, **kwargs):
+        nonlocal wait_calls
+        awaitable.close()
+        wait_calls += 1
+        if wait_calls == 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(app_module.asyncio, "wait_for", stop_after_second_cycle)
+    await app_module.background_supervisor_task()
+
+    assert supervisor.run_full_cycle.await_args_list == [
+        call(force_rss_refresh=True),
+        call(force_rss_refresh=False),
+    ]
+    assert qbit.test_connection.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_background_supervisor_retries_failed_startup_rss_refresh(monkeypatch):
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(Settings(id=1, qbit_host="http://qbit:8080", download_mode="direct"))
+        session.commit()
+
+    qbit = MagicMock()
+    qbit.test_connection.return_value = {"app_version": "test", "api_version": "test"}
+    supervisor = MagicMock()
+    supervisor.run_full_cycle = AsyncMock(side_effect=QbitRSSRefreshError("feed unavailable"))
+    app_module.state.last_cycle_time = None
+    monkeypatch.setattr(app_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(app_module, "QBitClient", MagicMock(return_value=qbit))
+    monkeypatch.setattr(app_module, "Supervisor", MagicMock(return_value=supervisor))
+    monkeypatch.setattr(app_module, "QBIT_RETRY_DELAYS", (0,))
+
+    async def cancel_sleep(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(app_module.asyncio, "sleep", cancel_sleep)
+    await app_module.background_supervisor_task()
+
+    supervisor.run_full_cycle.assert_awaited_once_with(force_rss_refresh=True)
+    assert "RSS refresh failed" in app_module.state.next_check_reason
+    assert app_module.state.last_cycle_time is None
 
 
 @pytest.mark.asyncio
@@ -398,7 +471,7 @@ async def test_background_supervisor_retries_when_qbit_drops_during_cycle(monkey
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(Settings(id=1, qbit_host="http://qbit:8080"))
+        session.add(Settings(id=1, qbit_host="http://qbit:8080", download_mode="direct"))
         session.commit()
 
     qbit = MagicMock()
@@ -427,7 +500,7 @@ async def test_background_supervisor_retries_when_qbit_drops_during_cycle(monkey
     monkeypatch.setattr(app_module.asyncio, "sleep", cancel_sleep)
     await app_module.background_supervisor_task()
 
-    supervisor.run_full_cycle.assert_awaited_once_with()
+    supervisor.run_full_cycle.assert_awaited_once_with(force_rss_refresh=True)
     assert "became unavailable during the cycle" in app_module.state.next_check_reason
     assert app_module.state.last_cycle_time is None
 
@@ -441,7 +514,7 @@ async def test_background_supervisor_can_cancel_during_reconnect_backoff(monkeyp
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(Settings(id=1, qbit_host="http://qbit:8080"))
+        session.add(Settings(id=1, qbit_host="http://qbit:8080", download_mode="direct"))
         session.commit()
 
     qbit = MagicMock()

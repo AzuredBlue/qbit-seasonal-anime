@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse
 from sqlmodel import Session
 
 from qbit_seasonal_anime.db.session import get_engine, get_settings, init_db
-from qbit_seasonal_anime.clients.qbit import QBitClient, QbitAuthenticationError, QbitClientError
+from qbit_seasonal_anime.clients.qbit import QBitClient, QbitAuthenticationError, QbitClientError, QbitRSSRefreshError
 from qbit_seasonal_anime.clients.anilist import AniListClient
 from qbit_seasonal_anime.core.supervisor import Supervisor
 from qbit_seasonal_anime.workers.scheduler import calculate_next_poll_interval
@@ -46,6 +46,7 @@ async def background_supervisor_task():
     anilist = AniListClient()
     state.add_log("Background supervisor service initialized.", "INFO")
     retry_index = 0
+    needs_rss_refresh = True
 
     while True:
         connection_ready = False
@@ -59,12 +60,13 @@ async def background_supervisor_task():
                     connection_ready = True
                     if retry_index:
                         state.add_log("qBittorrent connection restored.", "INFO")
-                    retry_index = 0
                 except QbitAuthenticationError as e:
+                    needs_rss_refresh = True
                     sleep_seconds = QBIT_AUTH_RETRY_SECONDS
                     _set_next_check(sleep_seconds, f"qBittorrent authentication failed: {e}")
                     state.add_log("qBittorrent authentication failed; check the configured username and password.", "ERROR")
                 except QbitClientError as e:
+                    needs_rss_refresh = True
                     sleep_seconds = _next_qbit_retry(retry_index)
                     retry_index = min(retry_index + 1, len(QBIT_RETRY_DELAYS) - 1)
                     _set_next_check(sleep_seconds, f"qBittorrent is unavailable: {e}")
@@ -75,18 +77,28 @@ async def background_supervisor_task():
                     state.is_running_cycle = True
                     state.add_log("Executing background supervision check...", "INFO")
                     try:
-                        logs = await supervisor.run_full_cycle()
+                        logs = await supervisor.run_full_cycle(force_rss_refresh=needs_rss_refresh)
                         await asyncio.to_thread(qbit.test_connection)
+                        needs_rss_refresh = False
+                        retry_index = 0
                         state.last_cycle_time = datetime.now(timezone.utc)
                         for l in logs:
                             state.add_log(f"Supervisor: {l}", "INFO")
                         if not logs:
                             state.add_log("Supervisor: All shows and rules up to date.", "INFO")
                     except QbitAuthenticationError as e:
+                        needs_rss_refresh = True
                         connection_ready = False
                         sleep_seconds = QBIT_AUTH_RETRY_SECONDS
                         _set_next_check(sleep_seconds, f"qBittorrent authentication failed: {e}")
+                    except QbitRSSRefreshError as e:
+                        needs_rss_refresh = True
+                        connection_ready = False
+                        sleep_seconds = _next_qbit_retry(retry_index)
+                        retry_index = min(retry_index + 1, len(QBIT_RETRY_DELAYS) - 1)
+                        _set_next_check(sleep_seconds, f"qBittorrent RSS refresh failed; direct evaluation deferred: {e}")
                     except QbitClientError as e:
+                        needs_rss_refresh = True
                         connection_ready = False
                         sleep_seconds = _next_qbit_retry(retry_index)
                         retry_index = min(retry_index + 1, len(QBIT_RETRY_DELAYS) - 1)
@@ -108,10 +120,12 @@ async def background_supervisor_task():
                                 download_mode=settings.download_mode,
                             )
                         except QbitAuthenticationError as e:
+                            needs_rss_refresh = True
                             connection_ready = False
                             sleep_seconds = QBIT_AUTH_RETRY_SECONDS
                             _set_next_check(sleep_seconds, f"qBittorrent authentication failed: {e}")
                         except QbitClientError as e:
+                            needs_rss_refresh = True
                             connection_ready = False
                             sleep_seconds = _next_qbit_retry(retry_index)
                             retry_index = min(retry_index + 1, len(QBIT_RETRY_DELAYS) - 1)

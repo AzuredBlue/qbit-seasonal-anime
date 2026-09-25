@@ -556,6 +556,101 @@ async def test_supervisor_direct_cycle_keeps_rules_disabled():
     await supervisor.run_full_cycle()
 
     qbit.add_torrent.assert_called()
+    qbit.refresh_rss_feeds.assert_not_called()
     qbit.set_rss_rule.assert_not_called()
+    session.close()
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_forced_direct_cycle_refreshes_before_grabbing():
+    engine, session = _database()
+    settings = Settings(
+        id=1,
+        default_category="Anime",
+        base_dir="/tmp/Anime",
+        download_mode="direct",
+        anilist_username="",
+    )
+    feed = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss", priority=1)
+    session.add(settings)
+    session.add(feed)
+    show = _show(
+        session,
+        status=MonitoredStatus.FIXED,
+        current_feed_id=feed.id,
+        last_confirmed_episode=7,
+        next_airing_episode=9,
+        next_airing_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
+    stale_tree = {
+        "SubsPlease": {
+            "url": feed.qbit_feed_url,
+            "isLoading": False,
+            "hasError": False,
+            "articles": [],
+        }
+    }
+    loading_tree = {
+        "SubsPlease": {
+            "url": feed.qbit_feed_url,
+            "isLoading": True,
+            "hasError": False,
+            "articles": [],
+        }
+    }
+    fresh_tree = {
+        "SubsPlease": {
+            "url": feed.qbit_feed_url,
+            "isLoading": False,
+            "hasError": False,
+            "articles": [{
+                "id": "ep8",
+                "title": "[SubsPlease] Sousou no Frieren - 08 (1080p) [9A5C7E1B].mkv",
+                "torrentURL": "magnet:ep8",
+            }],
+        }
+    }
+    events = []
+    qbit, _ = _qbit(events=events)
+    qbit.get_rss_feeds_flat.return_value = [{"name": "SubsPlease", "url": feed.qbit_feed_url}]
+    qbit.get_rss_rules.return_value = {}
+    qbit.get_rss_items.side_effect = [stale_tree, loading_tree, fresh_tree]
+    qbit.refresh_rss_feeds.side_effect = lambda: events.append("refresh") or True
+    qbit.add_torrent.side_effect = lambda **kwargs: events.append("add") or True
+    supervisor = Supervisor(session=session, qbit=qbit, anilist=MagicMock(), settings=settings)
+
+    logs = await supervisor.run_full_cycle(force_rss_refresh=True)
+
+    episode = session.exec(
+        select(Episode).where(
+            Episode.monitored_id == show.id,
+            Episode.episode_number == 8,
+        )
+    ).first()
+    assert episode.status == EpisodeStatus.DOWNLOADING
+    assert events == ["refresh", "add"]
+    assert "Refreshed qBittorrent RSS feeds before direct evaluation." in logs
+    assert qbit.get_rss_items.call_count == 3
+    qbit.set_rss_rule.assert_not_called()
+    session.close()
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_supervisor_forced_direct_cycle_preserves_retry_when_preflight_fails():
+    engine, session = _database()
+    settings = Settings(id=1, download_mode="direct", anilist_username="")
+    session.add(settings)
+    qbit = MagicMock()
+    qbit.get_rss_feeds_flat.return_value = []
+    qbit.get_rss_rules.return_value = {"[Seasonal] Show": {"enabled": True}}
+    qbit.set_rss_rule.side_effect = RuntimeError("busy")
+    supervisor = Supervisor(session=session, qbit=qbit, anilist=MagicMock(), settings=settings)
+
+    with pytest.raises(QbitClientError):
+        await supervisor.run_full_cycle(force_rss_refresh=True)
+
+    qbit.refresh_rss_feeds.assert_not_called()
     session.close()
     engine.dispose()

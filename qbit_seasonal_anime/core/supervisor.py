@@ -755,7 +755,7 @@ class Supervisor:
         logs.extend(self.sync_active_rules())
         return logs
 
-    async def run_full_cycle(self) -> List[str]:
+    async def run_full_cycle(self, *, force_rss_refresh: bool = False) -> List[str]:
         """Execute one complete supervision iteration."""
         all_logs: List[str] = []
         rss_snapshot = RssSnapshot(self.qbit)
@@ -776,10 +776,17 @@ class Supervisor:
             try:
                 all_logs.extend(await asyncio.to_thread(self.prepare_download_mode, "direct"))
             except Exception as e:
+                if force_rss_refresh:
+                    if isinstance(e, QbitClientError):
+                        raise
+                    raise QbitClientError(f"Direct startup/reconnect preflight failed: {e}") from e
                 all_logs.append(f"Direct mode blocked: {e}")
                 mode = "rules"
 
         if mode == "direct":
+            if force_rss_refresh:
+                await asyncio.to_thread(rss_snapshot.refresh)
+                all_logs.append("Refreshed qBittorrent RSS feeds before direct evaluation.")
             all_logs.extend(await asyncio.to_thread(
                 self.bootstrap_unassigned_shows,
                 rss_snapshot,

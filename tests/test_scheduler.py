@@ -1,7 +1,7 @@
 import unittest
 from datetime import timedelta
 from sqlmodel import Session, SQLModel, create_engine
-from qbit_seasonal_anime.db.models import Feed, Monitored, MonitoredStatus, utc_now
+from qbit_seasonal_anime.db.models import Episode, EpisodeStatus, Feed, Monitored, MonitoredStatus, utc_now
 from qbit_seasonal_anime.workers.scheduler import calculate_next_poll_interval
 
 
@@ -98,6 +98,125 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(duration, 21600)
         self.assertIn("direct ownership", reason)
         self.assertNotIn("working rules", reason)
+
+    def test_direct_fixed_show_hunts_for_post_rollover_wanted_episode(self):
+        show = Monitored(
+            id=71,
+            anilist_id=710,
+            display_name="Link Click Season 3",
+            aliases_json='["Link Click Season 3"]',
+            status=MonitoredStatus.FIXED,
+            current_feed_id=1,
+            last_confirmed_episode=7,
+            next_airing_episode=9,
+            next_airing_at=utc_now() + timedelta(days=7),
+        )
+        self.session.add(show)
+        self.session.flush()
+        self.session.add(Episode(monitored_id=show.id, episode_number=8, status=EpisodeStatus.WANTED))
+        self.session.commit()
+
+        duration, reason = calculate_next_poll_interval(
+            self.session,
+            default_interval_seconds=21600,
+            hunting_interval_seconds=300,
+            download_mode="direct",
+        )
+
+        self.assertEqual(duration, 300)
+        self.assertIn("Direct hunting", reason)
+        self.assertIn("Link Click Season 3", reason)
+
+    def test_direct_fixed_show_ignores_old_episode_gap(self):
+        show = Monitored(
+            id=74,
+            anilist_id=740,
+            display_name="Re:ZERO Season 4",
+            aliases_json='["Re:ZERO Season 4"]',
+            status=MonitoredStatus.FIXED,
+            current_feed_id=1,
+            last_confirmed_episode=18,
+            next_airing_episode=19,
+            next_airing_at=utc_now() + timedelta(days=5),
+        )
+        self.session.add(show)
+        self.session.flush()
+        self.session.add(Episode(monitored_id=show.id, episode_number=12, status=EpisodeStatus.WANTED))
+        self.session.add(Episode(monitored_id=show.id, episode_number=18, status=EpisodeStatus.COMPLETED))
+        self.session.add(Episode(monitored_id=show.id, episode_number=19, status=EpisodeStatus.WANTED))
+        self.session.commit()
+
+        duration, reason = calculate_next_poll_interval(
+            self.session,
+            default_interval_seconds=21600,
+            download_mode="direct",
+        )
+
+        self.assertEqual(duration, 21600)
+        self.assertIn("direct ownership", reason)
+
+    def test_direct_fixed_show_ignores_future_wanted_episode(self):
+        from unittest.mock import MagicMock
+
+        show = Monitored(
+            id=72,
+            anilist_id=720,
+            display_name="Caught Up Anime",
+            aliases_json='["Caught Up Anime"]',
+            status=MonitoredStatus.FIXED,
+            current_feed_id=1,
+            last_confirmed_episode=8,
+            next_airing_episode=9,
+            next_airing_at=utc_now() + timedelta(days=7),
+        )
+        self.session.add(show)
+        self.session.flush()
+        self.session.add(Episode(monitored_id=show.id, episode_number=8, status=EpisodeStatus.COMPLETED))
+        self.session.add(Episode(monitored_id=show.id, episode_number=9, status=EpisodeStatus.WANTED))
+        self.session.commit()
+        mock_qbit = MagicMock()
+
+        duration, reason = calculate_next_poll_interval(
+            self.session,
+            default_interval_seconds=21600,
+            qbit_client=mock_qbit,
+            download_mode="direct",
+        )
+
+        self.assertEqual(duration, 21600)
+        self.assertIn("direct ownership", reason)
+        mock_qbit.get_rss_refresh_interval_seconds.assert_not_called()
+
+    def test_rules_fixed_show_ignores_direct_episode_backlog(self):
+        from unittest.mock import MagicMock
+
+        show = Monitored(
+            id=73,
+            anilist_id=730,
+            display_name="Rules Anime",
+            aliases_json='["Rules Anime"]',
+            status=MonitoredStatus.FIXED,
+            current_feed_id=1,
+            last_confirmed_episode=7,
+            next_airing_episode=9,
+            next_airing_at=utc_now() + timedelta(days=7),
+        )
+        self.session.add(show)
+        self.session.flush()
+        self.session.add(Episode(monitored_id=show.id, episode_number=8, status=EpisodeStatus.WANTED))
+        self.session.commit()
+        mock_qbit = MagicMock()
+
+        duration, reason = calculate_next_poll_interval(
+            self.session,
+            default_interval_seconds=21600,
+            qbit_client=mock_qbit,
+            download_mode="rules",
+        )
+
+        self.assertEqual(duration, 21600)
+        self.assertIn("working rules", reason)
+        mock_qbit.get_rss_refresh_interval_seconds.assert_not_called()
 
     def test_observe_mode_uses_observation_message(self):
         show = Monitored(

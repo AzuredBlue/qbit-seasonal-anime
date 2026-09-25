@@ -21,6 +21,10 @@ class QbitAuthenticationError(QbitClientError):
     pass
 
 
+class QbitRSSRefreshError(QbitClientError):
+    pass
+
+
 class QBitClient:
     def __init__(self, host: str, username: str = "", password: str = "", timeout: int = 10):
         self.host = host
@@ -296,14 +300,20 @@ class QBitClient:
             logger.debug(f"Could not fetch matching articles for {rule_name}: {e}")
             return {}
 
-    def refresh_rss_feeds(self, feed_name: str = "") -> None:
-        """Trigger an immediate background refresh of all RSS feeds (or a specific feed) in qBittorrent."""
-        client = self.get_client()
+    def refresh_rss_feeds(self, feed_name: str = "") -> bool:
+        """Request an immediate background refresh and report whether qBittorrent accepted it."""
         try:
+            client = self.get_client()
             client.rss_refresh_item(item_path=feed_name)
             logger.debug("Triggered immediate RSS feeds refresh in qBittorrent.")
+            return True
+        except QbitClientError:
+            self._client = None
+            raise
         except Exception as e:
+            self._client = None
             logger.debug(f"Could not trigger RSS refresh in qBittorrent: {e}")
+            return False
 
     def get_rule_match_times(
         self,
