@@ -87,6 +87,9 @@ class Monitored(SQLModel, table=True):
     status_before_pause: Optional[str] = Field(default=None, nullable=True)
     custom_regex: Optional[str] = Field(default=None, nullable=True)
     custom_must_not: Optional[str] = Field(default=None, nullable=True)
+    feed_pinned: bool = Field(default=False)
+    candidate_feed_id: Optional[int] = Field(default=None, nullable=True)
+    candidate_feed_since: Optional[datetime] = Field(default=None, nullable=True)
 
     @property
     def aliases(self) -> List[str]:

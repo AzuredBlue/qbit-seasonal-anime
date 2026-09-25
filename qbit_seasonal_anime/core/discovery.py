@@ -162,23 +162,32 @@ def discover_feed_for_show(
                 parsed_cache=parsed_articles,
             )
             if is_match:
-                lower_match = (feed, parsed.get("release_group"), parsed.get("title"))
+                lower_match = (feed, parsed.get("release_group"), parsed.get("title"), art)
                 break
         if lower_match:
             break
 
     if lower_match:
-        matched_feed, rel_group, m_title = lower_match
+        matched_feed, rel_group, m_title, matched_art = lower_match
         now = datetime.now(timezone.utc)
         air_at = monitored.next_airing_at
         if air_at and air_at.tzinfo is None:
             air_at = air_at.replace(tzinfo=timezone.utc)
 
-        if air_at and (now - air_at).total_seconds() < preferred_feed_grace_seconds:
-            elapsed_m = (now - air_at).total_seconds() / 60
+        # The grace period lets a higher priority feed catch up once a release
+        # drops. Measure it from when the release became visible here rather than
+        # from AniList's airing time, which can be stale or still in the future.
+        released_at = parse_article_date(matched_art) if matched_art else None
+        if released_at and released_at > datetime.min.replace(tzinfo=timezone.utc):
+            grace_reference = released_at
+        else:
+            grace_reference = air_at
+
+        if grace_reference and (now - grace_reference).total_seconds() < preferred_feed_grace_seconds:
+            elapsed_m = (now - grace_reference).total_seconds() / 60
             logger.info(
                 f"Observed release on Priority #{matched_feed.priority} '{matched_feed.qbit_feed_name}' for '{monitored.display_name}', "
-                f"but waiting {preferred_feed_grace_seconds / 60:.1f}m buffer for Priority #1 '{top_feed.qbit_feed_name}' (elapsed: {elapsed_m:.1f}m)."
+                f"but waiting {preferred_feed_grace_seconds / 60:.1f}m buffer for Priority #{top_feed.priority} '{top_feed.qbit_feed_name}' (elapsed: {elapsed_m:.1f}m)."
             )
             if rss_snapshot is not None:
                 rss_snapshot.invalidate()

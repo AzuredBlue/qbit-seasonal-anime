@@ -67,6 +67,9 @@ def init_db(engine=None):
             ("status_before_pause", "VARCHAR"),
             ("custom_regex", "VARCHAR"),
             ("custom_must_not", "VARCHAR"),
+            ("feed_pinned", "BOOLEAN"),
+            ("candidate_feed_id", "INTEGER"),
+            ("candidate_feed_since", "DATETIME"),
         ]:
             if col_name not in monitored_cols:
                 session.exec(text(f"ALTER TABLE monitored ADD COLUMN {col_name} {col_type}"))

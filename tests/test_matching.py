@@ -114,6 +114,39 @@ class TestMatching(unittest.TestCase):
         self.assertEqual(parser.call_count, 1)
         self.assertNotEqual(second[2]["title"], "changed")
 
+    def test_parse_release_title_arc_qualified_alias_format(self):
+        parsed = parse_release_title(
+            "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 02 "
+            "[1080p NF WEB-DL AVC AAC][MultiSub][78128421]"
+        )
+        self.assertEqual(parsed["title"], "JoJo no Kimyou na Bouken: Steel Ball Run")
+        self.assertEqual(parsed["episode"], 2)
+        self.assertEqual(parsed["release_group"], "Erai-raws")
+
+    def test_match_release_arc_aliases_via_fuzzy_learning(self):
+        aliases = [
+            "JoJo no Kimyou na Bouken: Steel Ball Run - 2nd - 3rd STAGE",
+            "STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            "SBR",
+            "JoJo's Bizarre Adventure: Part 7\u2013Steel Ball Run",
+        ]
+        for episode in ("01", "02", "11", "24"):
+            release = f"[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - {episode} [1080p NF WEB-DL AVC AAC].mkv"
+            is_match, score, parsed = match_release_to_show(release, aliases)
+            self.assertTrue(is_match, release)
+            self.assertGreaterEqual(score, 85.0)
+            self.assertEqual(parsed["episode"], int(episode))
+
+        dotted = "JoJo.no.Kimyou.na.Bouken.Steel.Ball.Run - 12 [1080p].mkv"
+        is_match, _, parsed = match_release_to_show(dotted, aliases)
+        self.assertTrue(is_match)
+        self.assertEqual(parsed["episode"], 12)
+
+        unrelated = "[Erai-raws] Some Completely Different Show - 02 [1080p].mkv"
+        is_match, score, _ = match_release_to_show(unrelated, aliases)
+        self.assertFalse(is_match)
+        self.assertLess(score, 85.0)
+
 
 if __name__ == "__main__":
     unittest.main()

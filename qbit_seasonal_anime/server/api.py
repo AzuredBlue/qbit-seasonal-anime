@@ -175,6 +175,9 @@ def rediscover_show(show_id: int, session: Session = Depends(get_db), qbit: QBit
     show.qbit_rule_name = None
     show.matched_title = None
     show.matched_release_group = None
+    show.feed_pinned = False
+    show.candidate_feed_id = None
+    show.candidate_feed_since = None
     show.status = MonitoredStatus.UNCONFIRMED
     session.add(show)
     session.commit()
@@ -375,13 +378,18 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
     prefer_english = (getattr(settings, "title_language", "english") == "english")
     effective_display_name = show.title_english if (prefer_english and show.title_english) else (show.title_romaji or show.display_name)
 
-    from qbit_seasonal_anime.core.rules import build_rule_name, is_show_rule_enabled, compress_home_path, resolve_save_path, sanitize_folder_name
+    from qbit_seasonal_anime.core.rules import build_rule_name, is_show_rule_enabled, is_show_rule_unreleased, compress_home_path, resolve_save_path, sanitize_folder_name
     expected_rule_name = build_rule_name(show.id or 0, effective_display_name)
     rule_is_enabled = qbit_rule_data.get("enabled") if "enabled" in qbit_rule_data else is_show_rule_enabled(show)
     
     is_custom_folder = bool(show.save_folder and show.save_folder != sanitize_folder_name(show.display_name) and show.save_folder != sanitize_folder_name(show.title_romaji or "") and show.save_folder != sanitize_folder_name(show.title_english or ""))
     default_save_path = resolve_save_path(settings.base_dir, effective_display_name, show.save_folder if is_custom_folder else None)
     raw_save_path = qbit_rule_data.get("savePath") or default_save_path
+
+    # A pattern is only trustworthy once it was learned from a real release.
+    # Before that the feed it sits on is just a default, not an assignment.
+    is_upcoming = is_show_rule_unreleased(show)
+    has_learned_pattern = bool(show.matched_title or show.custom_regex)
 
     return {
         "show_id": show.id,
@@ -403,7 +411,20 @@ def get_show_rule_details(show_id: int, session: Session = Depends(get_db), qbit
         "matched_title": show.matched_title,
         "matched_release_group": show.matched_release_group,
         "matched_articles": matched_articles[:15],
+        "has_learned_pattern": has_learned_pattern,
+        "is_upcoming": is_upcoming,
+        "feed_pinned": bool(show.feed_pinned),
+        "candidate_feed_id": show.candidate_feed_id or 0,
+        "candidate_feed_name": feeds_map_name(session, show.candidate_feed_id),
+        "candidate_feed_since": show.candidate_feed_since.isoformat() if show.candidate_feed_since else None,
     }
+
+
+def feeds_map_name(session: Session, feed_id: Optional[int]) -> Optional[str]:
+    if not feed_id:
+        return None
+    candidate = session.get(Feed, feed_id)
+    return candidate.qbit_feed_name if candidate else None
 
 
 class EditShowRequest(BaseModel):
@@ -437,6 +458,12 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
     if req.must_not_contain is not None:
         show.custom_must_not = req.must_not_contain.strip() if req.must_not_contain.strip() else None
 
+    if req.current_feed_id is not None:
+        # An explicit pick pins the feed; auto-detect must not move it afterwards.
+        show.feed_pinned = req.current_feed_id > 0
+        show.candidate_feed_id = None
+        show.candidate_feed_since = None
+
     if show.status == MonitoredStatus.COMPLETED:
         if req.current_feed_id is not None and req.current_feed_id > 0:
             show.current_feed_id = req.current_feed_id
@@ -458,6 +485,9 @@ def edit_show(show_id: int, req: EditShowRequest, session: Session = Depends(get
         show.current_feed_id = None
         show.matched_title = None
         show.matched_release_group = None
+        show.feed_pinned = False
+        show.candidate_feed_id = None
+        show.candidate_feed_since = None
         show.status = MonitoredStatus.UNCONFIRMED
         session.add(show)
         session.commit()

@@ -1,6 +1,8 @@
+from typing import Dict, Optional
+
 from fastapi.responses import HTMLResponse
 
-def get_web_ui_html() -> HTMLResponse:
+def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -375,13 +377,16 @@ def get_web_ui_html() -> HTMLResponse:
     let currentInspectedShowId = null;
     let modalInitialState = null;
 
+    // Muted status colours: dim text on near-card-tone backgrounds, so a tag reads as
+    // a state marker rather than the brightest thing on the poster. All pairs keep
+    // >= 4.5:1 contrast against their own background.
     const STATUS_CONFIG = {
-      'FIXED': { label: 'Working', bg: 'bg-[#064e3b] text-[#34d399] border-[#059669]' },
-      'UNCONFIRMED': { label: 'Testing', bg: 'bg-[#713f12] text-[#facc15] border-[#a16207]' },
-      'UPCOMING': { label: 'Upcoming', bg: 'bg-[#1e3a8a] text-[#60a5fa] border-[#2563eb]' },
-      'STALLED': { label: 'Stalled', bg: 'bg-[#7f1d1d] text-[#f87171] border-[#dc2626]' },
-      'COMPLETED': { label: 'Completed', bg: 'bg-[#064e3b] text-[#34d399] border-[#059669]' },
-      'PAUSED': { label: 'Paused', bg: 'bg-[#27272a] text-[#a1a1aa] border-[#3f3f46]' },
+      'FIXED': { label: 'Working', bg: 'bg-[#062b20] text-[#4fb188] border-[#0f5138]' },
+      'UNCONFIRMED': { label: 'Testing', bg: 'bg-[#2b2208] text-[#c2a03f] border-[#55430a]' },
+      'UPCOMING': { label: 'Upcoming', bg: 'bg-[#101a3d] text-[#6c93c9] border-[#1f3a6b]' },
+      'STALLED': { label: 'Stalled', bg: 'bg-[#2b1111] text-[#c26a6a] border-[#5e2323]' },
+      'COMPLETED': { label: 'Completed', bg: 'bg-[#201338] text-[#a992d6] border-[#402c66]' },
+      'PAUSED': { label: 'Paused', bg: 'bg-[#1b1b1f] text-[#91919a] border-[#2e2e35]' },
     };
 
     function switchTab(tab) {
@@ -633,8 +638,8 @@ def get_web_ui_html() -> HTMLResponse:
           <div class="relative w-full aspect-[2/3] bg-[#121215] overflow-hidden">
             ${posterImg}
 
-            <div class="absolute top-2 left-2 z-10">
-              <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold border shadow-md tracking-wide ${cfg.bg}">
+            <div class="absolute top-2 right-2 z-10">
+              <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium border shadow-sm ${cfg.bg}">
                 ${label}
               </span>
             </div>
@@ -1002,29 +1007,59 @@ def get_web_ui_html() -> HTMLResponse:
         titleEl.textContent = data.display_name;
         ruleNameEl.textContent = data.rule_name || (isCompleted ? 'Completed Series' : 'No Rule Configured');
 
-        let ruleStatusPill = '';
+        let ruleStatusText = '';
         if (isCompleted) {
-          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Completed</span>';
+          ruleStatusText = '<span class="text-[11px] font-medium text-[#a992d6]">Completed</span>';
+        } else if (isPaused) {
+          ruleStatusText = '<span class="text-[11px] font-medium text-zinc-400">Paused</span>';
         } else if (isRuleActive) {
-          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-emerald-950/80 text-emerald-400 border border-emerald-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>Enabled (Active)</span>';
-        } else if (data.status === 'paused') {
-          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-amber-950/80 text-amber-300 border border-amber-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span>Disabled (Paused)</span>';
+          ruleStatusText = '<span class="text-[11px] font-medium text-zinc-300">Enabled</span>';
         } else {
-          ruleStatusPill = '<span class="px-2.5 py-0.5 rounded-md text-xs font-bold bg-sky-950/80 text-sky-300 border border-sky-800 flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Disabled (Waiting for Air Date)</span>';
+          ruleStatusText = '<span class="text-[11px] font-medium text-zinc-500">Waiting for air date</span>';
         }
 
-        const feedOptions = `<option value="0">[Auto-Discover / None]</option>` + 
-          allFeeds.map(f => `<option value="${f.id}" ${f.id === data.current_feed_id ? 'selected' : ''}>#${f.priority} ${f.qbit_feed_name}</option>`).join('');
+        const isUpcoming = data.is_upcoming === true;
+        const isTesting = data.status === 'unconfirmed' && !isUpcoming && !data.feed_pinned;
+
+        // No release matched and no feed pinned: the feed is not decided, so the
+        // selector offers Auto-discover and only marks the default being probed.
+        const isAutoManaged = !isCompleted && !data.feed_pinned && !data.has_learned_pattern;
+        const selectedFeedId = isAutoManaged ? 0 : (data.current_feed_id || 0);
+        const feedLabel = isUpcoming ? 'Feed (not decided yet)' : isTesting ? 'Feed (auto)' : 'Assigned Feed';
+
+        const feedOptions = `<option value="0">[ Auto-discover ]</option>` +
+          allFeeds.map(f => `<option value="${f.id}" ${f.id === selectedFeedId ? 'selected' : ''}>#${f.priority} ${escapeHtml(f.qbit_feed_name)}</option>`).join('');
+
+        // Until a release has been matched, the feed is only a starting point:
+        // say what it actually means instead of implying it was chosen.
+        let feedHint = '';
+        if (!isCompleted && data.has_rule) {
+            if (isUpcoming) {
+                feedHint = `
+                  <p class="text-[11px] text-zinc-500 leading-snug">Auto-discover is on. No release seen yet, so nothing is decided — every feed is checked and the rule moves by itself to whichever one posts the episode first.</p>
+                `;
+            } else if (isTesting) {
+                feedHint = `
+                  <p class="text-[11px] text-zinc-500 leading-snug">Auto-discover is on and still testing: every feed is re-checked in priority order, so this rule moves by itself if another feed posts the release first.</p>
+                `;
+            }
+        }
 
         const countMatched = (data.matched_articles || []).length;
+        const matchCountLabel = countMatched === 1 ? '1 match' : `${countMatched} matches`;
         const articlesHtml = (data.matched_articles && data.matched_articles.length > 0)
           ? data.matched_articles.map(a => `
-              <li class="flex items-center gap-2 text-xs font-mono text-emerald-300 bg-[#161e1a] border border-emerald-900/60 rounded px-2.5 py-1">
-                <span class="text-emerald-400 font-bold">✓</span>
-                <span class="truncate select-all" title="${a}">${a}</span>
-              </li>
+              <li class="text-[11px] font-mono text-zinc-400 py-1.5 border-t border-[#1c1c22] first:border-t-0 first:pt-0 truncate select-all" title="${escapeHtml(a)}">${escapeHtml(a)}</li>
             `).join('')
-          : '<li class="text-zinc-500 text-xs font-mono py-2 text-center bg-[#141418] rounded">No cached RSS articles currently match this rule pattern.</li>';
+          : '<li class="text-[11px] font-mono text-zinc-600 py-1.5">No cached RSS articles currently match this rule pattern.</li>';
+
+        const candidateBanner = data.candidate_feed_id ? `
+          <p class="text-[11px] text-zinc-500 leading-snug">Watching <span class="text-zinc-300">${escapeHtml(data.candidate_feed_name || 'another feed')}</span> — a release for this show appeared there but not on the preferred feed. The rule moves automatically if that stays true for 5 minutes.</p>
+        ` : '';
+
+        const pinnedBanner = data.feed_pinned ? `
+          <p class="text-[11px] text-zinc-500 leading-snug">Pinned by you — auto-detect will not move this show to another feed.</p>
+        ` : '';
 
         const noRulePlaceholder = isCompleted ? `
           <div class="bg-[#121215] border border-emerald-950/60 rounded-lg p-3 text-center">
@@ -1050,15 +1085,13 @@ def get_web_ui_html() -> HTMLResponse:
           </div>
         ` : noRulePlaceholder;
 
-        const articlesSection = data.has_rule ? `
+        const articlesSection = (data.has_rule && data.has_learned_pattern) ? `
           <div class="space-y-1 pt-0.5">
-            <div class="flex items-center justify-between">
+            <div class="flex items-baseline justify-between gap-2">
               <span class="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Live Matching Articles in RSS Feed</span>
-              <span class="text-[11px] font-mono font-semibold px-2 py-0.5 rounded-md ${countMatched > 0 ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-zinc-800 text-zinc-400 border border-zinc-700'}">
-                ${countMatched} Matches
-              </span>
+              <span class="text-[11px] font-mono text-zinc-500">${matchCountLabel}</span>
             </div>
-            <ul class="bg-[#121215] border border-[#2e2e38] rounded-lg p-2 max-h-24 overflow-y-auto space-y-1 shadow-inner">
+            <ul class="bg-[#121215] border border-[#2e2e38] rounded-lg px-3 py-2 max-h-24 overflow-y-auto">
               ${articlesHtml}
             </ul>
           </div>
@@ -1067,13 +1100,16 @@ def get_web_ui_html() -> HTMLResponse:
         contentEl.innerHTML = `
           <div class="space-y-1">
             <div class="flex items-center justify-between">
-              <label for="modal-feed-id" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">Assigned Feed</label>
-              ${ruleStatusPill}
+              <label for="modal-feed-id" class="block text-[11px] font-bold uppercase tracking-wider text-zinc-300">${feedLabel}</label>
+              ${ruleStatusText}
             </div>
             <select id="modal-feed-id" class="w-full bg-[#121215] border border-[#30303a] rounded-lg px-3.5 py-2 text-xs sm:text-sm text-zinc-100 font-medium focus:outline-none focus:border-zinc-500 shadow-inner">
               ${feedOptions}
             </select>
-            ${data.feed_url ? `<div class="text-[11px] text-zinc-500 font-mono truncate px-0.5">${data.feed_url}</div>` : ''}
+            ${(data.feed_url && !isAutoManaged) ? `<div class="text-[11px] text-zinc-500 font-mono truncate px-0.5">${data.feed_url}</div>` : ''}
+            ${feedHint}
+            ${pinnedBanner}
+            ${candidateBanner}
           </div>
 
           ${regexSections}
@@ -1097,7 +1133,10 @@ def get_web_ui_html() -> HTMLResponse:
           ${articlesSection}
         `;
         modalInitialState = {
-          current_feed_id: data.current_feed_id || 0,
+          // Tracks what the selector shows, not the internal feed id: while a show
+          // is undecided it renders as Auto-discover, and saving that untouched must
+          // not wipe the default feed the supervisor is probing.
+          current_feed_id: selectedFeedId,
           save_folder: (data.save_path || data.save_folder || '').trim(),
           category: (data.category || '').trim(),
           ratio_limit: data.ratio_limit !== undefined && data.ratio_limit !== null ? parseFloat(data.ratio_limit) : undefined,
@@ -1154,7 +1193,9 @@ def get_web_ui_html() -> HTMLResponse:
       const isMustNotChanged = modalInitialState && currentMustNotContain !== modalInitialState.must_not_contain;
 
       const payload = {
-        current_feed_id: currentFeedId,
+        // Only sent when the feed was actually changed: an explicit pick pins the
+        // feed, while saving other fields must leave auto-detect in charge.
+        current_feed_id: !modalInitialState || currentFeedId !== modalInitialState.current_feed_id ? currentFeedId : undefined,
         save_folder: currentSaveFolder || undefined,
         category: currentCategory || undefined,
         ratio_limit: currentRatio,
@@ -1757,4 +1798,4 @@ def get_web_ui_html() -> HTMLResponse:
 </body>
 </html>
 """
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html, headers=headers)

@@ -1,12 +1,26 @@
+import json
 import re
 import unittest
 from qbit_seasonal_anime.core.rules import (
+    RELEASE_NAME_JOINER,
     build_regex_pattern,
+    build_release_name_pattern,
     build_rule_definition,
     build_rule_name,
     sanitize_folder_name,
 )
 from qbit_seasonal_anime.db.models import Monitored, MonitoredStatus
+
+STEEL_BALL_RUN_ALIASES = [
+    "JoJo no Kimyou na Bouken: Steel Ball Run - 2nd - 3rd STAGE",
+    "STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+    "SBR",
+    "JoJo's Bizarre Adventure: Part 7\u2013Steel Ball Run",
+]
+ERAI_SBR_RELEASE = (
+    "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 02 "
+    "[1080p NF WEB-DL AVC AAC][MultiSub][78128421]"
+)
 
 
 class TestRules(unittest.TestCase):
@@ -31,11 +45,94 @@ class TestRules(unittest.TestCase):
             aliases=["Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season", "Mushoku Tensei S3"],
             matched_title="Mushoku Tensei S3",
         )
-        self.assertEqual(pattern, "Mushoku Tensei S3")
+        self.assertIn(f"Mushoku{RELEASE_NAME_JOINER}Tensei{RELEASE_NAME_JOINER}S3", pattern)
         self.assertTrue(re.search(pattern, "[SubsPlease] Mushoku Tensei S3 - 09 (1080p) [DDF202A0].mkv", re.IGNORECASE))
-        self.assertTrue(re.search(pattern, "Mushoku Tensei S3 - 09 (1080p) [Varyg].mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[SubsPlease] Mushoku Tensei Season 3 - 09 (1080p).mkv", re.IGNORECASE))
         self.assertTrue(re.search(pattern, "[Erai-raws] Mushoku Tensei S3 - 09 (1080p).mkv", re.IGNORECASE))
         self.assertFalse(re.search(pattern, "[SubsPlease] Bleach - 45.mkv", re.IGNORECASE))
+
+    def test_build_release_name_pattern_tolerates_separators(self):
+        pattern = build_release_name_pattern("Sousou no Frieren")
+        self.assertEqual(pattern, f"Sousou{RELEASE_NAME_JOINER}no{RELEASE_NAME_JOINER}Frieren")
+        self.assertTrue(re.search(pattern, "[SubsPlease] Sousou no Frieren - 08 (1080p).mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[Erai-raws] Sousou.no.Frieren - 09.mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[Erai-raws] Sousou_no_Frieren - 10.mkv", re.IGNORECASE))
+        self.assertTrue(re.search(pattern, "[Erai-raws] Sousou-No-Frieren - 11.mkv", re.IGNORECASE))
+        self.assertFalse(re.search(pattern, "[SubsPlease] Sousou no Kappa - 01 (1080p).mkv", re.IGNORECASE))
+
+    def test_build_release_name_pattern_requires_a_separator_between_tokens(self):
+        pattern = build_release_name_pattern("Sousou no Frieren")
+        self.assertIn(RELEASE_NAME_JOINER, pattern)
+        # Zero-width joins would let words run together, so a separator is required.
+        self.assertFalse(re.search(pattern, "[Erai-raws] SousounoFrieren - 08.mkv", re.IGNORECASE))
+        self.assertFalse(re.search(pattern, "[Erai-raws] Sousou_noFrieren - 08.mkv", re.IGNORECASE))
+
+    def test_build_release_name_pattern_escapes_metacharacters(self):
+        self.assertEqual(
+            build_release_name_pattern("Fate/stay night"),
+            f"Fate{RELEASE_NAME_JOINER}stay{RELEASE_NAME_JOINER}night",
+        )
+        self.assertEqual(
+            build_release_name_pattern("Re:Zero kara Hajimeru"),
+            f"Re{RELEASE_NAME_JOINER}Zero{RELEASE_NAME_JOINER}kara{RELEASE_NAME_JOINER}Hajimeru",
+        )
+        self.assertTrue(
+            re.search(build_release_name_pattern("86 Eighty-Six"), "[SubsPlease] 86 Eighty-Six - 05 (1080p).mkv", re.IGNORECASE)
+        )
+
+    def test_build_release_name_pattern_guards_short_names(self):
+        self.assertEqual(build_release_name_pattern("SBR"), "SBR")
+        self.assertEqual(build_release_name_pattern(""), "")
+        self.assertEqual(build_release_name_pattern("   "), "")
+        # Too generic to generalize: stays a literal, so it keeps matching its own format.
+        self.assertTrue(re.search(build_release_name_pattern("SBR"), "[Erai-raws] SBR - 01 [1080p].mkv", re.IGNORECASE))
+
+    def test_build_release_name_pattern_bounds_bare_numeric_tokens(self):
+        pattern = build_regex_pattern(["Sousou no Frieren 2"], matched_title="Sousou no Frieren 2")
+        self.assertTrue(re.search(pattern, "[SubsPlease] Sousou no Frieren 2 - 04 (1080p).mkv", re.IGNORECASE))
+        self.assertFalse(re.search(pattern, "[SubsPlease] Sousou no Frieren 20 - 04 (1080p).mkv", re.IGNORECASE))
+
+    def test_build_regex_pattern_from_steel_ball_run_release(self):
+        armed_pattern = build_regex_pattern(STEEL_BALL_RUN_ALIASES)
+        self.assertFalse(re.search(armed_pattern, ERAI_SBR_RELEASE, re.IGNORECASE))
+
+        learned_pattern = build_regex_pattern(
+            STEEL_BALL_RUN_ALIASES,
+            matched_title="JoJo no Kimyou na Bouken: Steel Ball Run",
+        )
+        self.assertIn(f"JoJo{RELEASE_NAME_JOINER}no", learned_pattern)
+        for episode in ("01", "02", "11", "24"):
+            release = f"[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - {episode} [1080p].mkv"
+            self.assertTrue(re.search(learned_pattern, release, re.IGNORECASE), episode)
+        self.assertTrue(
+            re.search(learned_pattern, "JoJo.no.Kimyou.na.Bouken.Steel.Ball.Run - 12 [1080p].mkv", re.IGNORECASE)
+        )
+        self.assertFalse(
+            re.search(learned_pattern, "[Erai-raws] Some Completely Different Show - 02 [1080p].mkv", re.IGNORECASE)
+        )
+        self.assertFalse(
+            re.search(learned_pattern, "[SubsPlease] Sousou no Frieren - 08 (1080p).mkv", re.IGNORECASE)
+        )
+
+    def test_build_rule_definition_uses_learned_tolerant_pattern(self):
+        show = Monitored(
+            id=7,
+            anilist_id=174051,
+            display_name="STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            aliases_json=json.dumps(STEEL_BALL_RUN_ALIASES),
+            matched_title="JoJo no Kimyou na Bouken: Steel Ball Run",
+            status=MonitoredStatus.FIXED,
+        )
+        rule_def = build_rule_definition(
+            monitored=show,
+            feed_url="https://www.erai-raws.info/rss-1080p/",
+            base_dir="~/Anime",
+        )
+        self.assertIn("Steel", rule_def["mustContain"])
+        self.assertTrue(re.search(rule_def["mustContain"], ERAI_SBR_RELEASE, re.IGNORECASE))
+        self.assertFalse(
+            re.search(rule_def["mustContain"], "[Erai-raws] Some Completely Different Show - 02 [1080p].mkv", re.IGNORECASE)
+        )
 
     def test_build_rule_definition(self):
         show = Monitored(
@@ -78,6 +175,113 @@ class TestRules(unittest.TestCase):
             base_dir="~/Anime",
         )
         self.assertFalse(upcoming_def["enabled"])
+
+    def test_build_rule_definition_preserves_qbittorrent_owned_state(self):
+        show = Monitored(
+            id=1,
+            anilist_id=154587,
+            display_name="Sousou no Frieren",
+            aliases_json='["Sousou no Frieren"]',
+            status=MonitoredStatus.FIXED,
+        )
+        previous = {
+            "lastMatch": "Fri, 25 Sep 2026 10:53:42 +0000",
+            "previouslyMatchedEpisodes": ["08"],
+        }
+
+        preserved = build_rule_definition(
+            monitored=show,
+            feed_url="https://subsplease.org/rss/?r=1080",
+            base_dir="~/Anime",
+            previous_rule=previous,
+        )
+        self.assertEqual(preserved["lastMatch"], "Fri, 25 Sep 2026 10:53:42 +0000")
+        self.assertEqual(preserved["previouslyMatchedEpisodes"], ["08"])
+
+        # Without a previous rule (brand new rule) the fields stay empty.
+        fresh = build_rule_definition(
+            monitored=show,
+            feed_url="https://subsplease.org/rss/?r=1080",
+            base_dir="~/Anime",
+        )
+        self.assertEqual(fresh["lastMatch"], "")
+        self.assertEqual(fresh["previouslyMatchedEpisodes"], [])
+
+    def test_create_or_update_rule_does_not_blank_existing_rule_state(self):
+        from unittest.mock import MagicMock
+        from qbit_seasonal_anime.db.models import Feed
+        from qbit_seasonal_anime.core.rules import create_or_update_rule
+
+        mock_qbit = MagicMock()
+        show = Monitored(
+            id=1,
+            anilist_id=1,
+            display_name="Frieren",
+            aliases_json='["Sousou no Frieren"]',
+            qbit_rule_name="[Seasonal] Frieren",
+            status=MonitoredStatus.FIXED,
+        )
+        feed = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss")
+        mock_qbit.get_rss_rules.return_value = {
+            "[Seasonal] Frieren": {
+                "lastMatch": "Fri, 25 Sep 2026 10:53:42 +0000",
+                "previouslyMatchedEpisodes": ["08"],
+            }
+        }
+
+        create_or_update_rule(
+            qbit_client=mock_qbit,
+            monitored=show,
+            feed=feed,
+            base_dir="/tmp/Anime",
+        )
+
+        written = mock_qbit.set_rss_rule.call_args.kwargs["rule_def"]
+        self.assertEqual(written["lastMatch"], "Fri, 25 Sep 2026 10:53:42 +0000")
+        self.assertEqual(written["previouslyMatchedEpisodes"], ["08"])
+
+    def test_create_or_update_rule_survives_rule_read_failure(self):
+        from unittest.mock import MagicMock
+        from qbit_seasonal_anime.db.models import Feed
+        from qbit_seasonal_anime.clients.qbit import QbitClientError
+        from qbit_seasonal_anime.core.rules import create_or_update_rule
+
+        mock_qbit = MagicMock()
+        mock_qbit.get_rss_rules.side_effect = QbitClientError("qBittorrent busy")
+        show = Monitored(
+            id=1,
+            anilist_id=1,
+            display_name="Frieren",
+            aliases_json='["Sousou no Frieren"]',
+            qbit_rule_name="[Seasonal] Frieren",
+            status=MonitoredStatus.FIXED,
+        )
+        feed = Feed(id=1, qbit_feed_name="SubsPlease", qbit_feed_url="https://subsplease.org/rss")
+
+        create_or_update_rule(qbit_client=mock_qbit, monitored=show, feed=feed, base_dir="/tmp/Anime")
+
+        written = mock_qbit.set_rss_rule.call_args.kwargs["rule_def"]
+        self.assertEqual(written["lastMatch"], "")
+        self.assertEqual(written["previouslyMatchedEpisodes"], [])
+
+    def test_match_state_alone_does_not_trigger_a_rule_rewrite(self):
+        from qbit_seasonal_anime.core.supervisor import _rules_are_equivalent
+
+        base = {
+            "mustContain": "Sousou",
+            "mustNotContain": "720p",
+            "affectedFeeds": ["https://subsplease.org/rss"],
+            "savePath": "/tmp/Anime/Sousou no Frieren",
+            "assignedCategory": "Seasonal",
+            "useRegex": True,
+            "enabled": True,
+        }
+        current = dict(base, lastMatch="Fri, 25 Sep 2026 10:53:42 +0000", previouslyMatchedEpisodes=["08"])
+        desired = dict(base, lastMatch="", previouslyMatchedEpisodes=[])
+        self.assertTrue(_rules_are_equivalent(current, desired))
+
+        drifted = dict(base, mustContain="Something Else")
+        self.assertFalse(_rules_are_equivalent(current, drifted))
 
     def test_build_rule_name(self):
         name = build_rule_name(42, "Frieren: Beyond Journey's End")

@@ -122,14 +122,24 @@ def check_and_handle_stalls(
                     if stalled_feed_id and stalled_feed_id not in failed_feed_ids:
                         failed_feed_ids.append(stalled_feed_id)
 
-                    discovery_res = discover_feed_for_show(
-                        monitored=show,
-                        feeds=all_feeds,
-                        qbit_client=qbit_client,
-                        excluded_feed_ids=failed_feed_ids,
-                        rss_snapshot=rss_snapshot,
-                        parsed_articles=parsed_articles,
-                    )
+                    # A user-pinned feed is never switched automatically.
+                    discovery_res = None
+                    if show.feed_pinned:
+                        msg = (
+                            f"STALL: '{show.display_name}' has no release, but its feed is pinned by you — "
+                            f"keeping it instead of falling back to another feed."
+                        )
+                        logger.warning(msg)
+                        logs.append(msg)
+                    else:
+                        discovery_res = discover_feed_for_show(
+                            monitored=show,
+                            feeds=all_feeds,
+                            qbit_client=qbit_client,
+                            excluded_feed_ids=failed_feed_ids,
+                            rss_snapshot=rss_snapshot,
+                            parsed_articles=parsed_articles,
+                        )
 
                     if discovery_res:
                         fallback_feed, obs_group, matched_title = discovery_res
@@ -169,7 +179,10 @@ def check_and_handle_stalls(
                             logger.error(f"Failed creating fallback rule for '{show.display_name}': {e}")
                             logs.append(f"Error creating fallback rule: {e}")
                     else:
-                        avail = [f for f in all_feeds if f.id not in failed_feed_ids]
+                        if show.feed_pinned:
+                            avail = [f for f in all_feeds if f.id == show.current_feed_id]
+                        else:
+                            avail = [f for f in all_feeds if f.id not in failed_feed_ids]
                         if avail:
                             fallback_feed = avail[0]
                             try:

@@ -15,7 +15,12 @@ logger = logging.getLogger("qbit_seasonal_anime.core.supervisor")
 
 
 def _rules_are_equivalent(current: Dict[str, Any], desired: Dict[str, Any]) -> bool:
-    """Return True if an existing qBittorrent rule matches the desired definition."""
+    """Return True if an existing qBittorrent rule matches the desired definition.
+
+    Deliberately ignores qBittorrent-owned state (lastMatch, previouslyMatchedEpisodes):
+    those change on every match, and comparing them would rewrite rules continuously,
+    which is exactly what would wipe that state.
+    """
     try:
         return (
             current.get("mustContain") == desired.get("mustContain")
@@ -411,6 +416,7 @@ class Supervisor:
                 continue
 
             rule_name = show.qbit_rule_name or build_rule_name(show.id or 0, show.display_name)
+            current_def = existing_rules.get(rule_name)
             desired_def = build_rule_definition(
                 monitored=show,
                 feed_url=feed.qbit_feed_url,
@@ -419,9 +425,9 @@ class Supervisor:
                 ratio_limit=self.settings.default_seed_ratio,
                 release_group=show.matched_release_group,
                 title_language=getattr(self.settings, "title_language", "english"),
+                previous_rule=current_def,
             )
 
-            current_def = existing_rules.get(rule_name)
             if current_def and _rules_are_equivalent(current_def, desired_def):
                 continue
 

@@ -14,6 +14,13 @@ ROMAN_TO_INT = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6}
 INT_TO_ROMAN = {1: "I", 2: "II", 3: "III", 4: "IV", 5: "V", 6: "VI"}
 DEFAULT_MUST_NOT = r"(720p|480p|540p|360p|576p|batch|complete|\(\d+[-~]\d+\)|\[\d+[-~]\d+\])"
 
+RELEASE_NAME_SPLIT_REGEX: re.Pattern[str] = re.compile(r"[\s._\-:–—/]+")
+# At least one separator is required between tokens: the observed name had one
+# everywhere we split, and requiring it keeps "Foo Bar" from matching "FooBar".
+RELEASE_NAME_JOINER = r"[\s._\-:–—/]+"
+MIN_PATTERN_TOKENS = 2
+MIN_PATTERN_CHARS = 6
+
 
 def generate_season_variants(alias: str) -> List[str]:
     """Generate common release group season abbreviations (e.g. 'Mushoku Tensei S3', 'Mushoku Tensei Season 3')."""
@@ -65,6 +72,37 @@ def sanitize_regex_token(title: str) -> str:
     return re.sub(r"\s+", " ", escaped)
 
 
+def build_release_name_pattern(release_name: str) -> str:
+    """
+    Build a separator-tolerant regex from a release name observed on a feed.
+
+    Release groups are inconsistent about how they join the words of a title
+    (spaces, dots, underscores, hyphens, colons), so a literal token stops
+    matching as soon as the same show is announced differently. The episode
+    number and quality tags are not part of the name, which keeps the pattern
+    valid for every later episode of the same show.
+    """
+    if not release_name:
+        return ""
+
+    stripped = release_name.strip()
+    tokens = [token for token in RELEASE_NAME_SPLIT_REGEX.split(stripped) if token]
+    if not tokens:
+        return ""
+
+    if len(tokens) < MIN_PATTERN_TOKENS or len(stripped) < MIN_PATTERN_CHARS:
+        return sanitize_regex_token(stripped)
+
+    escaped = []
+    for token in tokens:
+        safe_token = sanitize_regex_token(token).replace("'", "['\u2019]?")
+        if token.isdigit():
+            # Bare numeric season variants ("Foo 3") must not match "Foo 30".
+            safe_token += r"\b"
+        escaped.append(safe_token)
+    return RELEASE_NAME_JOINER.join(escaped)
+
+
 def build_regex_pattern(
     aliases: List[str],
     matched_title: Optional[str] = None,
@@ -75,8 +113,18 @@ def build_regex_pattern(
     If matched_title is known, use it as the rule; otherwise build an alternation from aliases.
     """
     if matched_title and matched_title.strip():
-        token = sanitize_regex_token(matched_title)
-        return rf"{token}"
+        patterns: List[str] = []
+        for variant in [matched_title, *generate_season_variants(matched_title)]:
+            pattern = build_release_name_pattern(variant)
+            if pattern:
+                patterns.append(pattern)
+
+        unique_patterns = list(dict.fromkeys(patterns))
+        if not unique_patterns:
+            return ".*"
+        if len(unique_patterns) == 1:
+            return unique_patterns[0]
+        return rf"({'|'.join(unique_patterns)})"
 
     valid_aliases = [a.strip() for a in aliases if a and a.strip()]
     latin_aliases = [a for a in valid_aliases if any(c.isascii() and c.isalnum() for c in a)]
@@ -178,6 +226,23 @@ def build_rule_name(monitored_id: int, display_name: str) -> str:
     return f"[Seasonal] {clean_name}"
 
 
+def is_show_rule_unreleased(monitored: Monitored) -> bool:
+    """
+    True while a show has not started airing yet: premiere still ahead (or unscheduled)
+    and nothing downloaded so far. These shows are "upcoming", not "testing".
+    """
+    now = utc_now()
+    air_at = monitored.next_airing_at
+    if air_at and air_at.tzinfo is None:
+        air_at = air_at.replace(tzinfo=timezone.utc)
+
+    return (
+        (monitored.next_airing_episode == 1 or monitored.next_airing_episode is None)
+        and (air_at is None or air_at > now)
+        and (monitored.last_confirmed_episode or 0) == 0
+    )
+
+
 def is_show_rule_enabled(monitored: Monitored) -> bool:
     """
     Determine if a show's RSS rule in qBittorrent should be actively enabled.
@@ -192,19 +257,7 @@ def is_show_rule_enabled(monitored: Monitored) -> bool:
     if monitored.status == MonitoredStatus.FIXED:
         return True
 
-    # UNCONFIRMED / STALLED check
-    now = utc_now()
-    air_at = monitored.next_airing_at
-    if air_at and air_at.tzinfo is None:
-        air_at = air_at.replace(tzinfo=timezone.utc)
-
-    # If premiere has not aired on Japanese TV yet (air date in future or TBA) and no previous episodes were confirmed
-    is_unreleased = (
-        (monitored.next_airing_episode == 1 or monitored.next_airing_episode is None)
-        and (air_at is None or air_at > now)
-        and (monitored.last_confirmed_episode or 0) == 0
-    )
-    if is_unreleased:
+    if is_show_rule_unreleased(monitored):
         return False
 
     return True
@@ -221,9 +274,16 @@ def build_rule_definition(
     must_contain: Optional[str] = None,
     must_not_contain: Optional[str] = None,
     title_language: str = "english",
+    previous_rule: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Construct the JSON payload for qBittorrent's RSS rule definition."""
+    """Construct the JSON payload for qBittorrent's RSS rule definition.
+
+    Pass the rule as it currently exists in qBittorrent as ``previous_rule`` so
+    state qBittorrent owns (when it last matched, which episodes it already has)
+    is carried over instead of being reset by every write.
+    """
     effective_group = release_group or monitored.matched_release_group
+    previous_state = previous_rule or {}
     
     regex = (
         must_contain
@@ -260,10 +320,10 @@ def build_rule_definition(
         "useRegex": True,
         "episodeFilter": "",
         "smartFilter": False,
-        "previouslyMatchedEpisodes": [],
+        "previouslyMatchedEpisodes": list(previous_state.get("previouslyMatchedEpisodes") or []),
         "affectedFeeds": [feed_url],
         "ignoreDays": 0,
-        "lastMatch": "",
+        "lastMatch": previous_state.get("lastMatch") or "",
         "addPaused": False,
         "assignedCategory": category,
         "savePath": save_path,
@@ -291,6 +351,7 @@ def create_or_update_rule(
     must_not_contain: Optional[str] = None,
     title_language: str = "english",
     known_categories: Optional[Set[str]] = None,
+    previous_rule: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Create or update a qBittorrent RSS rule and return the rule name."""
     if category and (known_categories is None or category not in known_categories):
@@ -298,6 +359,14 @@ def create_or_update_rule(
             known_categories.add(category)
 
     rule_name = monitored.qbit_rule_name or build_rule_name(monitored.id or 0, monitored.display_name)
+
+    if previous_rule is None:
+        try:
+            previous_rule = qbit_client.get_rss_rules().get(rule_name)
+        except QbitClientError as e:
+            logger.debug(f"Could not read existing rule '{rule_name}' state: {e}")
+            previous_rule = None
+
     rule_def = build_rule_definition(
         monitored=monitored,
         feed_url=feed.qbit_feed_url,
@@ -309,6 +378,7 @@ def create_or_update_rule(
         must_contain=must_contain,
         must_not_contain=must_not_contain,
         title_language=title_language,
+        previous_rule=previous_rule,
     )
 
     qbit_client.set_rss_rule(rule_name=rule_name, rule_def=rule_def)

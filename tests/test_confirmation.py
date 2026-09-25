@@ -1,8 +1,18 @@
+import json
+import re
 import unittest
+from datetime import timedelta
 from unittest.mock import MagicMock
 from sqlmodel import Session, create_engine, SQLModel, select
 from qbit_seasonal_anime.core.confirmation import verify_and_confirm_torrents
 from qbit_seasonal_anime.db.models import Feed, MatchHistory, Monitored, MonitoredStatus, RuleHistory, RuleOutcome, Settings, utc_now
+
+STEEL_BALL_RUN_ALIASES = [
+    "JoJo no Kimyou na Bouken: Steel Ball Run - 2nd - 3rd STAGE",
+    "STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+    "SBR",
+    "JoJo's Bizarre Adventure: Part 7\u2013Steel Ball Run",
+]
 
 
 class TestConfirmation(unittest.TestCase):
@@ -177,6 +187,171 @@ class TestConfirmation(unittest.TestCase):
         underlying.log_main.assert_called_once()
         underlying.rss_rules.assert_called_once()
 
+    def _split_arc_setup(self, show_id, **overrides):
+        """Show armed on the #1 feed while the release only exists on the #2 feed."""
+        from datetime import timedelta
+
+        release_title = (
+            "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 02 "
+            "[1080p NF WEB-DL AVC AAC][MultiSub][78128421]"
+        )
+        subsplease = self.feed
+        erai = Feed(id=2, qbit_feed_name="Erai-Raws 1080p", qbit_feed_url="https://nyaa.si/?page=rss&q=Erai-raws", priority=2)
+        self.session.add(erai)
+        fields = dict(
+            id=show_id,
+            anilist_id=174051,
+            display_name="STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            aliases_json=json.dumps(STEEL_BALL_RUN_ALIASES),
+            status=MonitoredStatus.UNCONFIRMED,
+            current_feed_id=subsplease.id,
+            qbit_rule_name="[Seasonal] STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            total_episodes=24,
+            next_airing_episode=2,
+            next_airing_at=utc_now() + timedelta(days=7),
+        )
+        fields.update(overrides)
+        show = Monitored(**fields)
+        self.session.add(show)
+        self.session.commit()
+
+        mock_qbit = MagicMock()
+        mock_qbit.get_rule_match_times.return_value = {}
+        released_at = utc_now() - timedelta(hours=2)
+        mock_qbit.get_rss_items.return_value = {
+            "SubsPlease": {
+                "url": subsplease.qbit_feed_url,
+                "articles": [
+                    {"title": "[SubsPlease] Link Click S3 - 08 (1080p) [FE7080C1].mkv", "torrentURL": "magnet:lc"},
+                ],
+            },
+            "Erai-Raws 1080p": {
+                "url": erai.qbit_feed_url,
+                "articles": [
+                    {
+                        "title": release_title,
+                        "torrentURL": "https://nyaa/2.torrent",
+                        "date": released_at.strftime("%a, %d %b %Y %H:%M:%S +0000"),
+                    }
+                ],
+            },
+        }
+        return show, subsplease, erai, release_title, mock_qbit
+
+    def test_confirmation_waits_five_minutes_then_moves_to_feed_that_carried_the_release(self):
+        show, subsplease, erai, release_title, mock_qbit = self._split_arc_setup(3)
+
+        first_logs = verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+
+        # First sighting only records the candidate and starts the grace clock.
+        self.assertEqual(show.current_feed_id, subsplease.id)
+        self.assertEqual(show.status, MonitoredStatus.UNCONFIRMED)
+        self.assertEqual(show.candidate_feed_id, erai.id)
+        self.assertIsNotNone(show.candidate_feed_since)
+        self.assertTrue(any("waiting 5m" in log for log in first_logs))
+        mock_qbit.set_rss_rule.assert_not_called()
+
+        # Before the window is up nothing moves.
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+        self.assertEqual(show.current_feed_id, subsplease.id)
+        mock_qbit.set_rss_rule.assert_not_called()
+
+        # Once the five minutes are up the rule moves and learns the pattern.
+        show.candidate_feed_since = show.candidate_feed_since - timedelta(seconds=301)
+        self.session.add(show)
+        self.session.commit()
+
+        second_logs = verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+
+        self.assertTrue(any("moved rule" in log for log in second_logs))
+        self.assertEqual(show.current_feed_id, erai.id)
+        self.assertEqual(show.status, MonitoredStatus.FIXED)
+        self.assertEqual(show.last_confirmed_episode, 2)
+        self.assertEqual(show.matched_title, "JoJo no Kimyou na Bouken: Steel Ball Run")
+        self.assertEqual(show.matched_release_group, "Erai-raws")
+        self.assertIsNone(show.candidate_feed_id)
+        self.assertIsNone(show.candidate_feed_since)
+
+        moved = self.session.exec(select(RuleHistory).where(RuleHistory.monitored_id == 3)).all()
+        self.assertEqual(len(moved), 1)
+        self.assertEqual(moved[0].feed_id, erai.id)
+        self.assertEqual(moved[0].outcome, RuleOutcome.CONFIRMED)
+
+        written_defs = [call.kwargs["rule_def"] for call in mock_qbit.set_rss_rule.call_args_list]
+        must_contain = written_defs[0]["mustContain"]
+        self.assertEqual(written_defs[0]["affectedFeeds"], [erai.qbit_feed_url])
+        self.assertTrue(re.search(must_contain, release_title, re.IGNORECASE))
+        self.assertTrue(
+            re.search(
+                must_contain,
+                "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 03 [1080p NF WEB-DL AVC AAC].mkv",
+                re.IGNORECASE,
+            )
+        )
+
+    def test_preferred_feed_wins_even_after_the_grace_window_expired(self):
+        show, subsplease, erai, _, mock_qbit = self._split_arc_setup(4)
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+        self.assertEqual(show.candidate_feed_id, erai.id)
+
+        # The preferred feed finally posts the release, and the window has expired.
+        show.candidate_feed_since = show.candidate_feed_since - timedelta(seconds=3600)
+        self.session.add(show)
+        self.session.commit()
+        subsplease_release = "[SubsPlease] STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE - 02 (1080p) [A1B2C3D4].mkv"
+        mock_qbit.get_rss_items.return_value["SubsPlease"]["articles"] = [
+            {"title": subsplease_release, "torrentURL": "magnet:sbr", "date": utc_now().strftime("%a, %d %b %Y %H:%M:%S +0000")},
+        ]
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+
+        # Stays on the preferred feed and forgets the candidate.
+        self.assertEqual(show.current_feed_id, subsplease.id)
+        self.assertEqual(show.status, MonitoredStatus.FIXED)
+        self.assertIsNone(show.candidate_feed_id)
+        self.assertIsNone(show.candidate_feed_since)
+
+    def test_user_pinned_feed_is_never_moved(self):
+        show, subsplease, erai, _, mock_qbit = self._split_arc_setup(5, feed_pinned=True)
+
+        for _ in range(3):
+            verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+            self.session.refresh(show)
+            show.candidate_feed_since = show.candidate_feed_since - timedelta(seconds=600) if show.candidate_feed_since else None
+            self.session.add(show)
+            self.session.commit()
+
+        self.assertEqual(show.current_feed_id, subsplease.id)
+        self.assertEqual(show.status, MonitoredStatus.UNCONFIRMED)
+        self.assertIsNone(show.candidate_feed_id)
+        mock_qbit.set_rss_rule.assert_not_called()
+
+    def test_upcoming_show_is_auto_detected_across_feeds(self):
+        show, subsplease, erai, release_title, mock_qbit = self._split_arc_setup(
+            6,
+            next_airing_episode=1,
+            next_airing_at=utc_now() + timedelta(days=7),
+        )
+        # Pretend the candidate was spotted five minutes ago.
+        show.candidate_feed_id = erai.id
+        show.candidate_feed_since = utc_now() - timedelta(seconds=400)
+        self.session.add(show)
+        self.session.commit()
+
+        verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+
+        self.assertEqual(show.current_feed_id, erai.id)
+        self.assertEqual(show.status, MonitoredStatus.FIXED)
+        self.assertEqual(show.matched_title, "JoJo no Kimyou na Bouken: Steel Ball Run")
+        self.assertTrue(re.search(mock_qbit.set_rss_rule.call_args.kwargs["rule_def"]["mustContain"], release_title, re.IGNORECASE))
+
     def test_confirmation_no_matching_article_remains_unconfirmed(self):
         mock_qbit = MagicMock()
         mock_qbit.get_rss_items.return_value = {
@@ -192,6 +367,74 @@ class TestConfirmation(unittest.TestCase):
         self.session.refresh(self.show)
 
         self.assertEqual(self.show.status, MonitoredStatus.UNCONFIRMED)
+
+    def test_confirmation_learns_split_cour_release_and_rewrites_rule(self):
+        import re
+
+        release_title = (
+            "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 02 "
+            "[1080p NF WEB-DL AVC AAC][MultiSub][78128421]"
+        )
+        sbr_feed = Feed(id=2, qbit_feed_name="Erai-raws", qbit_feed_url="https://www.erai-raws.info/rss-1080p/", priority=2)
+        self.session.add(sbr_feed)
+        show = Monitored(
+            id=2,
+            anilist_id=174051,
+            display_name="STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            aliases_json=json.dumps(STEEL_BALL_RUN_ALIASES),
+            status=MonitoredStatus.UNCONFIRMED,
+            current_feed_id=2,
+            qbit_rule_name="[Seasonal] STEEL BALL RUN JoJo's Bizarre Adventure 2nd - 3rd STAGE",
+            total_episodes=24,
+            next_airing_episode=2,
+        )
+        self.session.add(show)
+        self.session.commit()
+
+        mock_qbit = MagicMock()
+        mock_qbit.get_rule_match_times.return_value = {}
+        mock_qbit.get_rss_items.return_value = {
+            "Erai-raws": {
+                "url": "https://www.erai-raws.info/rss-1080p/",
+                "articles": [
+                    {
+                        "title": release_title,
+                        "torrentURL": "https://erai/2.torrent",
+                        "date": "25 Sep 2026 12:00:00 +0000",
+                    }
+                ],
+            }
+        }
+
+        logs = verify_and_confirm_torrents(self.session, mock_qbit, self.settings)
+        self.session.refresh(show)
+
+        self.assertEqual(show.status, MonitoredStatus.FIXED)
+        self.assertEqual(show.last_confirmed_episode, 2)
+        self.assertEqual(show.matched_title, "JoJo no Kimyou na Bouken: Steel Ball Run")
+        self.assertEqual(show.matched_release_group, "Erai-raws")
+        self.assertTrue(any("Confirmed rule" in log for log in logs))
+
+        mock_qbit.set_rss_rule.assert_called_once()
+        must_contain = mock_qbit.set_rss_rule.call_args.kwargs["rule_def"]["mustContain"]
+        # The rewritten rule must match the release that just dropped, so
+        # qBittorrent still downloads this very episode.
+        self.assertTrue(re.search(must_contain, release_title, re.IGNORECASE))
+        self.assertTrue(
+            re.search(
+                must_contain,
+                "[Erai-raws] JoJo no Kimyou na Bouken: Steel Ball Run - 03 [1080p NF WEB-DL AVC AAC].mkv",
+                re.IGNORECASE,
+            )
+        )
+        self.assertFalse(
+            re.search(must_contain, "[Erai-raws] Some Completely Different Show - 02 [1080p].mkv", re.IGNORECASE)
+        )
+
+        m_hist = self.session.exec(select(MatchHistory).where(MatchHistory.monitored_id == 2)).all()
+        self.assertEqual(len(m_hist), 1)
+        self.assertEqual(m_hist[0].release_title, release_title)
+        self.assertEqual(m_hist[0].episode, 2)
 
 
 if __name__ == "__main__":

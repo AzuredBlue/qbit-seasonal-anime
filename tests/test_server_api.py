@@ -303,6 +303,148 @@ def test_edit_show_endpoint(client, session, mock_qbit):
     updated = session.get(Monitored, show.id)
     assert updated.save_folder == "Bleach Custom"
     assert updated.current_feed_id == feed.id
+    # An explicit feed choice pins it, so auto-detect leaves it alone.
+    assert updated.feed_pinned is True
+
+
+def test_editing_other_fields_leaves_the_feed_and_pin_alone(client, session, mock_qbit):
+    feed = Feed(id=1, qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=4010,
+        display_name="Blue Box Season 2",
+        aliases_json='["Blue Box Season 2"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        feed_pinned=True,
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    res = client.post(f"/api/shows/{show.id}/edit", json={"ratio_limit": 2.5})
+    assert res.status_code == 200
+
+    session.expire_all()
+    updated = session.get(Monitored, show.id)
+    assert updated.current_feed_id == feed.id
+    assert updated.feed_pinned is True
+    # The edit still applied — to the rule, which is where ratio lives.
+    written = mock_qbit.set_rss_rule.call_args.kwargs["rule_def"]
+    assert written["ratioLimit"] == 2.5
+
+
+def test_picking_auto_discover_feed_unpins_the_show(client, session, mock_qbit):
+    feed = Feed(id=1, qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=4002,
+        display_name="Re:Zero",
+        aliases_json='["Re:Zero"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        feed_pinned=True,
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    res = client.post(f"/api/shows/{show.id}/edit", json={"current_feed_id": 0})
+    assert res.status_code == 200
+
+    session.expire_all()
+    updated = session.get(Monitored, show.id)
+    assert updated.current_feed_id is None
+    assert updated.feed_pinned is False
+
+
+def test_rule_details_flags_unlearned_pattern(client, session, mock_qbit):
+    feed = Feed(id=1, qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=4003,
+        display_name="Upcoming Anime",
+        aliases_json='["Upcoming Anime", "Upcoming Anime 2nd Season"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        next_airing_episode=1,
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    mock_qbit.get_rss_items.return_value = {
+        "Feed 1": {"url": "https://feed1.org/rss", "articles": []}
+    }
+
+    res = client.get(f"/api/shows/{show.id}/rule")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["has_learned_pattern"] is False
+    assert data["is_upcoming"] is True
+    assert data["feed_pinned"] is False
+    assert data["candidate_feed_id"] == 0
+
+
+def test_rule_details_reports_testing_show_not_upcoming(client, session, mock_qbit):
+    from datetime import timedelta
+
+    from qbit_seasonal_anime.db.models import utc_now
+
+    feed = Feed(id=1, qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.org/rss", priority=1)
+    show = Monitored(
+        anilist_id=4005,
+        display_name="Aired But Unmatched Anime",
+        aliases_json='["Aired But Unmatched Anime"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        next_airing_episode=3,
+        next_airing_at=utc_now() - timedelta(hours=6),
+    )
+    session.add(feed)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    mock_qbit.get_rss_items.return_value = {
+        "Feed 1": {"url": "https://feed1.org/rss", "articles": []}
+    }
+
+    data = client.get(f"/api/shows/{show.id}/rule").json()
+    assert data["is_upcoming"] is False
+    assert data["has_learned_pattern"] is False
+
+
+def test_rule_details_reports_watched_candidate_feed(client, session, mock_qbit):
+    from datetime import timedelta
+
+    from qbit_seasonal_anime.db.models import utc_now
+
+    feed = Feed(id=1, qbit_feed_name="Feed 1", qbit_feed_url="https://feed1.org/rss", priority=1)
+    other = Feed(id=2, qbit_feed_name="Feed 2", qbit_feed_url="https://feed2.org/rss", priority=2)
+    show = Monitored(
+        anilist_id=4004,
+        display_name="Split Cour Anime",
+        aliases_json='["Split Cour Anime"]',
+        status=MonitoredStatus.UNCONFIRMED,
+        current_feed_id=feed.id,
+        candidate_feed_id=other.id,
+        candidate_feed_since=utc_now() - timedelta(minutes=1),
+    )
+    session.add(feed)
+    session.add(other)
+    session.add(show)
+    session.commit()
+    session.refresh(show)
+
+    mock_qbit.get_rss_items.return_value = {
+        "Feed 1": {"url": "https://feed1.org/rss", "articles": []}
+    }
+
+    data = client.get(f"/api/shows/{show.id}/rule").json()
+    assert data["candidate_feed_id"] == other.id
+    assert data["candidate_feed_name"] == "Feed 2"
+    assert data["candidate_feed_since"] is not None
 
 
 def test_title_language_setting_switch(client, session):

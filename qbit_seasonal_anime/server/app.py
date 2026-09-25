@@ -96,7 +96,9 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return get_web_ui_html()
+        # The UI is a single generated page that changes with every deploy, so it
+        # must never be served from a browser cache.
+        return get_web_ui_html(headers={"Cache-Control": "no-store, must-revalidate"})
 
     return app
 

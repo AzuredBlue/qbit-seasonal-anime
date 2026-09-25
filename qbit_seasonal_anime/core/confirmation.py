@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from sqlmodel import Session, select, or_
 from qbit_seasonal_anime.clients.qbit import QBitClient, QbitClientError
 from qbit_seasonal_anime.core.matching import match_release_to_show, prepare_aliases
@@ -72,6 +72,52 @@ def record_match_event(
 
 
 
+def _best_article_match(
+    articles: List[Dict[str, Any]],
+    aliases: List[str],
+    test_pattern: str,
+    prepared_aliases: Optional[List[Tuple[str, str]]],
+    parsed_articles: Optional[Dict[str, Dict[str, Any]]],
+) -> Optional[Tuple[int, str, Dict[str, Any], Dict[str, Any]]]:
+    """Return (episode, title, parsed, article) for the highest-episode matching article."""
+    best: Optional[Tuple[int, str, Dict[str, Any], Dict[str, Any]]] = None
+    for article in articles:
+        title = article.get("title", "")
+        is_match, _, parsed = match_release_to_show(
+            title,
+            aliases,
+            test_pattern=test_pattern,
+            prepared_aliases=prepared_aliases,
+            parsed_cache=parsed_articles,
+        )
+        if not is_match:
+            continue
+        episode = parsed.get("episode")
+        if episode is not None and (best is None or episode > best[0]):
+            best = (episode, title, parsed, article)
+    return best
+
+
+FEED_SWITCH_GRACE_SECONDS = 300
+
+
+def _find_release_on_feed(
+    feed: Feed,
+    articles_by_url: Dict[str, List[Dict[str, Any]]],
+    aliases: List[str],
+    test_pattern: str,
+    prepared_aliases: Optional[List[Tuple[str, str]]],
+    parsed_articles: Optional[Dict[str, Dict[str, Any]]],
+) -> Optional[Tuple[int, str, Dict[str, Any], Dict[str, Any]]]:
+    return _best_article_match(
+        articles_by_url.get(feed.qbit_feed_url) or [],
+        aliases,
+        test_pattern,
+        prepared_aliases,
+        parsed_articles,
+    )
+
+
 def verify_and_confirm_rules_from_feeds(
     session: Session,
     qbit_client: QBitClient,
@@ -84,6 +130,9 @@ def verify_and_confirm_rules_from_feeds(
     Verify and confirm rules against new and cached RSS feed articles.
     When a feed article matches an unconfirmed show's regex and aliases,
     it confirms the rule as working (Works) and updates the last confirmed episode.
+    Unconfirmed shows that stay quiet on their own feed are re-checked against the
+    other feeds by priority, so a release that only appears further down the list
+    is picked up instead of waiting for the stall timer.
     """
     logs: List[str] = []
 
@@ -109,39 +158,117 @@ def verify_and_confirm_rules_from_feeds(
     if parsed_articles is None:
         parsed_articles = {}
 
+    ordered_feeds = sorted(feeds_map.values(), key=lambda f: f.priority)
+    top_feed = ordered_feeds[0] if ordered_feeds else None
+    failed_stmt = select(RuleHistory.monitored_id, RuleHistory.feed_id).where(
+        RuleHistory.outcome.in_([RuleOutcome.STALLED, RuleOutcome.FALSE_POSITIVE, RuleOutcome.REPLACED]),
+        RuleHistory.feed_id.isnot(None),
+    )
+    failed_feeds_by_show: Dict[int, List[int]] = {}
+    for monitored_id, failed_feed_id in session.exec(failed_stmt).all():
+        failed_feeds_by_show.setdefault(monitored_id, []).append(failed_feed_id)
+
     candidates = []
     for show in monitored_shows:
         feed = feeds_map.get(show.current_feed_id)
         if not feed:
             continue
 
-        articles = articles_by_url.get(feed.qbit_feed_url) or []
         aliases = show.aliases
-        test_pattern = build_regex_pattern(aliases)
         prepared_aliases = prepare_aliases(aliases)
-        best_ep = None
-        matched_title = None
-        best_parsed = None
-        best_art = None
+        test_pattern = build_regex_pattern(aliases)
+        found = _find_release_on_feed(feed, articles_by_url, aliases, test_pattern, prepared_aliases, parsed_articles)
 
-        for article in articles:
-            title = article.get("title", "")
-            is_match, _, parsed = match_release_to_show(
-                title,
-                aliases,
-                test_pattern=test_pattern,
-                prepared_aliases=prepared_aliases,
-                parsed_cache=parsed_articles,
-            )
-            if is_match:
-                episode = parsed.get("episode")
-                if episode is not None and (best_ep is None or episode > best_ep):
-                    best_ep = episode
-                    matched_title = title
-                    best_parsed = parsed
-                    best_art = article
+        if found is not None and show.candidate_feed_id:
+            show.candidate_feed_id = None
+            show.candidate_feed_since = None
+            session.add(show)
 
-        if best_ep is not None:
+        if (
+            found is None
+            and show.status == MonitoredStatus.UNCONFIRMED
+            and not show.feed_pinned
+            and top_feed is not None
+        ):
+            # This show's feed never saw the release. Walk the other feeds by
+            # priority, giving the preferred feed a short grace window so we do
+            # not move just because the preferred feed is a little slower.
+            detected_feed = None
+            detected_title = None
+            detected_group = None
+            for other_feed in ordered_feeds:
+                if other_feed.id in failed_feeds_by_show.get(show.id, []):
+                    continue
+                other_found = _find_release_on_feed(
+                    other_feed, articles_by_url, aliases, test_pattern, prepared_aliases, parsed_articles
+                )
+                if other_found:
+                    detected_feed = other_feed
+                    detected_title = other_found[2].get("title")
+                    detected_group = other_found[2].get("release_group")
+                    break
+
+            if detected_feed and detected_feed.id != feed.id:
+                now = utc_now()
+                since = show.candidate_feed_since
+                if since and since.tzinfo is None:
+                    since = since.replace(tzinfo=timezone.utc)
+                is_recorded_candidate = show.candidate_feed_id == detected_feed.id and since is not None
+                grace_elapsed = is_recorded_candidate and (now - since).total_seconds() >= FEED_SWITCH_GRACE_SECONDS
+
+                if not is_recorded_candidate:
+                    # First sighting: start the grace clock, but keep waiting.
+                    show.candidate_feed_id = detected_feed.id
+                    show.candidate_feed_since = now
+                    session.add(show)
+                    session.commit()
+                    waiting = FEED_SWITCH_GRACE_SECONDS // 60
+                    msg = (
+                        f"'{show.display_name}': release seen on '{detected_feed.qbit_feed_name}' but not on "
+                        f"'{top_feed.qbit_feed_name}' yet — waiting {waiting}m before moving the rule."
+                    )
+                    logger.info(msg)
+                    logs.append(msg)
+                elif grace_elapsed:
+                    show.current_feed_id = detected_feed.id
+                    show.matched_title = detected_title
+                    show.matched_release_group = detected_group
+                    show.candidate_feed_id = None
+                    show.candidate_feed_since = None
+                    try:
+                        show.qbit_rule_name = create_or_update_rule(
+                            qbit_client=qbit_client,
+                            monitored=show,
+                            feed=detected_feed,
+                            base_dir=settings.base_dir,
+                            category=settings.default_category,
+                            ratio_limit=settings.default_seed_ratio,
+                            release_group=detected_group,
+                            known_categories=known_categories,
+                        )
+                    except QbitClientError as e:
+                        logger.warning(f"Could not move rule for '{show.display_name}' to '{detected_feed.qbit_feed_name}': {e}")
+                    session.add(RuleHistory(
+                        monitored_id=show.id,
+                        feed_id=detected_feed.id,
+                        outcome=RuleOutcome.PENDING,
+                        note=f"Release appeared on '{detected_feed.qbit_feed_name}' while '{feed.qbit_feed_name}' stayed silent",
+                    ))
+                    session.add(show)
+                    session.commit()
+                    msg = (
+                        f"'{show.display_name}': release found on '{detected_feed.qbit_feed_name}', not on "
+                        f"'{feed.qbit_feed_name}' — moved rule and kept it armed for the rest of the series."
+                    )
+                    logger.info(msg)
+                    logs.append(msg)
+                    feed = detected_feed
+                    found = _find_release_on_feed(
+                        feed, articles_by_url, aliases, test_pattern, prepared_aliases, parsed_articles
+                    )
+
+        if found is not None:
+            best_ep, matched_title, best_parsed, best_art = found
             rule_name = show.qbit_rule_name or f"[Seasonal] {show.display_name}"
             candidates.append({
                 "show": show,
