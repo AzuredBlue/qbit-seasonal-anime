@@ -120,6 +120,15 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
           </div>
         </div>
 
+        <div id="section-completed" class="space-y-3 pt-2">
+          <div class="flex items-center gap-2 border-b border-[#222228] pb-1.5">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Completed</h2>
+            <span id="header-count-completed" class="text-xs text-zinc-500 font-mono">(0)</span>
+          </div>
+          <div id="grid-completed" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
+          </div>
+        </div>
+
         <div id="section-planned" class="space-y-3 pt-2">
           <div class="flex items-center gap-2 border-b border-[#222228] pb-1.5">
             <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-300">Planned</h2>
@@ -501,17 +510,14 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
       });
     }
 
+    function isShowCompleted(show) {
+      return (show.status || '').toUpperCase() === 'COMPLETED';
+    }
+
     function sortShowsList(list) {
       const copy = [...list];
-      const isCompleted = s => ((s.status || '').toUpperCase() === 'COMPLETED');
 
       copy.sort((a, b) => {
-        const aCompleted = isCompleted(a);
-        const bCompleted = isCompleted(b);
-
-        if (aCompleted && !bCompleted) return 1;
-        if (!aCompleted && bCompleted) return -1;
-
         if (currentSortMode === 'airing') {
           const now = Date.now();
           const aTime = a.next_airing_at ? new Date(a.next_airing_at).getTime() : Infinity;
@@ -537,18 +543,30 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
 
     function renderShows() {
       updateSortButtonStyles();
-      const releasingShows = sortShowsList(allShows.filter(s => s.is_released));
-      const plannedShows = sortShowsList(allShows.filter(s => !s.is_released));
+      // Completed shows sit in their own section, so they are pulled out first
+      // rather than relying on them to be filtered out of Releasing/Planned.
+      const completedShows = sortShowsList(allShows.filter(s => isShowCompleted(s)));
+      const activeShows = allShows.filter(s => !isShowCompleted(s));
+      const releasingShows = sortShowsList(activeShows.filter(s => s.is_released));
+      const plannedShows = sortShowsList(activeShows.filter(s => !s.is_released));
 
       document.getElementById('badge-total-shows').textContent = allShows.length;
       document.getElementById('header-count-releasing').textContent = `(${releasingShows.length})`;
       document.getElementById('header-count-planned').textContent = `(${plannedShows.length})`;
+      document.getElementById('header-count-completed').textContent = `(${completedShows.length})`;
 
       const gridReleasing = document.getElementById('grid-releasing');
       const gridPlanned = document.getElementById('grid-planned');
+      const gridCompleted = document.getElementById('grid-completed');
 
       gridReleasing.innerHTML = releasingShows.map(renderShowCard).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No currently releasing anime.</div>';
       gridPlanned.innerHTML = plannedShows.map(renderShowCard).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No planned upcoming anime.</div>';
+      gridCompleted.innerHTML = completedShows.map(renderShowCard).join('') || '<div class="col-span-full py-6 text-center text-zinc-500 text-xs font-mono">No completed anime.</div>';
+
+      // Releasing is always shown so the page is never blank; the trailing
+      // sections are noise when they have nothing in them.
+      document.getElementById('section-completed').classList.toggle('hidden', completedShows.length === 0);
+      document.getElementById('section-planned').classList.toggle('hidden', plannedShows.length === 0);
     }
 
     function formatEpisodeCountdown(targetDateStr) {
@@ -580,7 +598,7 @@ def get_web_ui_html(headers: Optional[Dict[str, str]] = None) -> HTMLResponse:
     function renderShowCard(show) {
       const rawStatus = (show.status || 'UNCONFIRMED').toUpperCase();
       const isPaused = rawStatus === 'PAUSED';
-      const isCompleted = rawStatus === 'COMPLETED';
+      const isCompleted = isShowCompleted(show);
       const statusKey = isPaused ? ((show.status_before_pause || 'UNCONFIRMED').toUpperCase()) : rawStatus;
 
       let cfg = STATUS_CONFIG[statusKey] || STATUS_CONFIG['UNCONFIRMED'];
